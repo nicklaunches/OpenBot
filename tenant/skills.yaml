@@ -257,11 +257,14 @@ skills:
     title: Check the webmaster mailbox
     summary: Read and search webmaster@nicklaunches.com; draft replies for approval before sending.
     instructions: >-
-      Use the mailbox tool on your computer for anything about webmaster@nicklaunches.com. Run it
-      with the shell: "python3 /workspace/.mail/mail.py list 10" for the newest messages,
-      "read <uid>" for one message, "search <text>" to find by subject or sender. Never read the
-      credentials file at /workspace/.mail/credentials and never print its contents; the tool
-      handles sign-in itself. Sending is "send <to> <subject>" with the body on stdin, and it
-      happens only after a person approves the exact recipient, subject, and body in this
-      conversation. Quote the message you are answering when you draft a reply.
-    tools: []
+      Use the mailbox tools for anything about webmaster@nicklaunches.com: list the newest messages,
+      read one by uid, search by subject or sender. Match what you find against the outreach
+      tickets when the two overlap, and say which uid you are relying on. Sending is a separate,
+      approved act: draft the reply in the conversation first, with the exact recipient, subject,
+      and body, and call send_message only after a person approves that text. Pass in_reply_to so
+      the reply threads under the original. Never send to an address nobody asked you to write to.
+    tools:
+      - mailbox/list_messages
+      - mailbox/read_message
+      - mailbox/search_messages
+      - mailbox/send_message

@@ -726,3 +726,104 @@ describe("how far a Bot may hand work on", () => {
     ).toThrow("BOT_HANDOFF_MAX_PER_RUN");
   });
 });
+
+/**
+ * The mailbox, which is three variables that mean nothing apart and one secret that is not here.
+ *
+ * The absent case is the one worth pinning: it is the ordinary state of every deployment that does
+ * not want this, and it must not be a start-up failure: the catalogue entry stays admissible and
+ * grantable either way, and a tool call is where a deployment finds out.
+ */
+describe("the deployment's mailbox", () => {
+  const MAILBOX = {
+    MAILBOX_IMAP_HOST: "imap.example.test",
+    MAILBOX_SMTP_HOST: "smtp.example.test",
+    MAILBOX_USER: "bot@example.test",
+  };
+
+  test("is absent when none of it is set, without refusing to start", () => {
+    expect(loadConfig(baseEnvironment).mailbox).toBeUndefined();
+  });
+
+  test("defaults both ports to the implicit-TLS ones", () => {
+    // 993 and 465 rather than the STARTTLS ports, so the connection is encrypted before the
+    // password is sent rather than negotiating for it in the clear.
+    expect(loadConfig({ ...baseEnvironment, ...MAILBOX }).mailbox).toEqual({
+      imapHost: "imap.example.test",
+      imapPort: 993,
+      smtpHost: "smtp.example.test",
+      smtpPort: 465,
+      user: "bot@example.test",
+      // Unset means anywhere, which is the behaviour every deployment had before the list existed.
+      allowedRecipientDomains: new Set(),
+    });
+  });
+
+  test("reads the recipient allowlist, lower-cased and without the @ people write", () => {
+    expect(
+      loadConfig({
+        ...baseEnvironment,
+        ...MAILBOX,
+        MAILBOX_ALLOWED_RECIPIENT_DOMAINS: "Example.com, @partner.example",
+      }).mailbox?.allowedRecipientDomains,
+    ).toEqual(new Set(["example.com", "partner.example"]));
+  });
+
+  test("an emptied allowlist means anywhere, not nowhere", () => {
+    // A blanked line in a .env has switched the restriction off. The opposite reading would be a
+    // mailbox that silently refuses everybody.
+    expect(
+      loadConfig({
+        ...baseEnvironment,
+        ...MAILBOX,
+        MAILBOX_ALLOWED_RECIPIENT_DOMAINS: "  ",
+      }).mailbox?.allowedRecipientDomains.size,
+    ).toBe(0);
+  });
+
+  test("refuses an allowlist entry that is not a domain", () => {
+    // A safety list written as an address would match nothing while looking like a restriction.
+    for (const entry of ["sales@example.com", "https://example.com", "a b"]) {
+      expect(() =>
+        loadConfig({
+          ...baseEnvironment,
+          ...MAILBOX,
+          MAILBOX_ALLOWED_RECIPIENT_DOMAINS: entry,
+        }),
+      ).toThrow("MAILBOX_ALLOWED_RECIPIENT_DOMAINS");
+    }
+  });
+
+  test("takes ports a deployment names", () => {
+    expect(
+      loadConfig({
+        ...baseEnvironment,
+        ...MAILBOX,
+        MAILBOX_IMAP_PORT: "1993",
+        MAILBOX_SMTP_PORT: "2465",
+      }).mailbox,
+    ).toMatchObject({ imapPort: 1993, smtpPort: 2465 });
+  });
+
+  test("refuses half a mailbox, naming what is missing", () => {
+    // Booting with a host and no user is a deployment where every mail tool fails at the first
+    // login, at run time, in front of somebody, with nothing but an auth error to go on.
+    expect(() =>
+      loadConfig({
+        ...baseEnvironment,
+        MAILBOX_IMAP_HOST: "imap.example.test",
+      }),
+    ).toThrow("MAILBOX_SMTP_HOST, MAILBOX_USER");
+    expect(() =>
+      loadConfig({ ...baseEnvironment, MAILBOX_USER: "bot@example.test" }),
+    ).toThrow("MAILBOX_IMAP_HOST, MAILBOX_SMTP_HOST");
+  });
+
+  test("refuses a port that is not a port, rather than falling back to the default", () => {
+    for (const port of ["nine-nine-three", "0", "70000", "993.5"]) {
+      expect(() =>
+        loadConfig({ ...baseEnvironment, ...MAILBOX, MAILBOX_IMAP_PORT: port }),
+      ).toThrow("MAILBOX_IMAP_PORT must be a port number between 1 and 65535");
+    }
+  });
+});

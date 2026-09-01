@@ -1,0 +1,788 @@
+import type { MailboxConfig } from "../config";
+import {
+  createMailboxClients,
+  type FullMessage,
+  MAX_BODY_CHARS,
+  MAX_SOURCE_BYTES,
+  type MailboxClients,
+  MailboxError,
+  type MessageHeader,
+  type MessagePage,
+  type OutgoingMessage,
+} from "../mailbox/client";
+import { MAX_RESULT_CHARS, type McpCallResult, type McpTool } from "./mcp";
+
+/**
+ * The builtin transport for the Mailbox: a Bot reading and answering the deployment's mail, without
+ * leaving the building.
+ *
+ * WHAT MAKES THIS DIFFERENT FROM ROUTINES, the other builtin. Routines has no credential at all,
+ * because it acts on this deployment's own tables and the ACTOR is the authorization. This one does
+ * have a credential, a mailbox password, and it is the deployment's rather than anybody's: there is one
+ * mailbox, every Bot granted these tools reads the same one, and no person consents to it. So the
+ * authorization here is the GRANT: an administrator decides which Bots may read the mail and which
+ * may answer it, per tool, on the Plugins page, exactly as they would for a vendor's connector.
+ *
+ * That is why nothing below reads `connection.actorId` as permission. A run that reaches here has
+ * already passed the grant check and the policy decision in `plugins/store.ts`, and there is no
+ * per-person narrowing left to do: the mailbox does not have somebody's half.
+ *
+ * THE PASSWORD IS NEVER IN THE ENVIRONMENT and never in an answer. The hosts and the user come from
+ * `config.ts`; the password comes from the encrypted credential vault, as the `mailbox` credential,
+ * resolved through {@link MailboxAccess.password} at the moment a call needs it and thrown away
+ * after. {@link redacted} is the last line of that: a failure sentence from a mail server that
+ * echoed the login back is scrubbed before anybody reads it.
+ *
+ * It implements the same interface as every other transport, as module-level exports, because that
+ * is the shape {@link ./transport} resolves: a `TransportKind` maps to a MODULE. Which is also why
+ * the configuration and the vault arrive through {@link useMailbox} rather than a constructor: the
+ * registry is built at import time, long before `index.ts` has either.
+ */
+
+/**
+ * What the tools act on: where the mailbox is, how to unlock it, and how the protocols are spoken.
+ *
+ * `password` is a function rather than a string because a secret read once at boot is a secret held
+ * in memory for the life of the process and stale the moment an administrator rotates it. Read per
+ * call, a rotation takes effect on the next call and a revocation refuses it.
+ */
+export type MailboxAccess = {
+  config: MailboxConfig;
+  /** The password from the vault, or null when this deployment holds none. */
+  password: () => Promise<string | null>;
+  /**
+   * How IMAP and SMTP are actually spoken. Defaults to imapflow and nodemailer.
+   *
+   * Injected so a test can assert what a call was about to go out with, which is the same reason
+   * `PluginStoreOptions.callVendor` exists: the reply headers, the caps and the argument checking
+   * are the properties worth being sure about, and asserting them otherwise would need a reachable
+   * mail server.
+   */
+  clients?: (config: MailboxConfig, password: string) => MailboxClients;
+};
+
+/**
+ * Which credential in the vault is the mailbox password.
+ *
+ * Here rather than at the one call site in `index.ts`, because it is a contract with two other
+ * parties: the administrator who types these three values at `/admin/credentials`, and
+ * `docs/mailbox.md`, which tells them to. Three strings agreeing across three places by convention
+ * is how a deployment ends up holding the right secret under a key nothing reads.
+ *
+ * `mcp` is the kind because that is the vault's name for "the one token this deployment holds for
+ * this server", which is the same kind a custom MCP server's own bearer token is stored under and
+ * the same thing a mailbox password is: one secret, the deployment's, used for every Bot granted
+ * the tools.
+ */
+export const MAILBOX_CREDENTIAL = Object.freeze({
+  kind: "mcp",
+  provider: "mailbox",
+  keyId: "mailbox",
+} as const);
+
+let installed: MailboxAccess | null = null;
+
+/**
+ * Hand this module the mailbox, once, from the place that has the configuration and the vault.
+ *
+ * A module-level binding rather than a constructor argument, for the reason {@link
+ * ./builtin-routines.useRoutineTools} gives: `transportFor` resolves a kind to a MODULE and there is
+ * no seam to pass anything through. `null` is a supported argument, and not only for symmetry: the
+ * suite is one process, so a test that installs a stub has to be able to take it back out again,
+ * and a deployment with no mailbox configured installs nothing.
+ */
+export function useMailbox(access: MailboxAccess | null): void {
+  installed = access;
+}
+
+/** The mailbox a tool reads when the call did not name one. */
+const DEFAULT_MAILBOX = "INBOX";
+
+/** Bounds on how much mail one call may return. See {@link boundedLimit}. */
+const LIST_LIMIT = { fallback: 10, max: 50 } as const;
+const SEARCH_LIMIT = { fallback: 20, max: 50 } as const;
+
+/**
+ * The largest number that can be a uid, which is what IMAP's own 32-bit field allows (RFC 3501).
+ *
+ * Checked here so a model that produced `1e21` is told there is no such message, in the same words
+ * as any other uid that is not there. Without it the number reaches imapflow, which refuses to
+ * compile a sequence set out of it, and the model is handed "Invalid sequence set value" about an
+ * argument it thinks of as a message number.
+ */
+const MAX_UID = 4_294_967_295;
+
+/**
+ * What a call answers when this deployment has no mailbox configured.
+ *
+ * Names all four things, including the one that is not an environment variable, because the half a
+ * reader is most likely to be missing is the half that is not in `.env`. The catalogue entry stays
+ * admissible and grantable without any of it (see `DeploymentConfig.mailbox`), so this sentence,
+ * rather than a missing connector, is how a deployment finds out.
+ */
+const NOT_CONFIGURED =
+  "Mailbox is not configured. Set MAILBOX_IMAP_HOST, MAILBOX_SMTP_HOST, MAILBOX_USER and store the password as the mailbox credential.";
+
+/**
+ * What a call answers when the hosts are configured and the vault holds no password.
+ *
+ * Its own sentence rather than the one above, because it is a different job with a different fix: an
+ * administrator has already set the three variables and has one step left, at a different screen.
+ * Telling them to set variables they can see are already set is how a correct instruction gets read
+ * as a broken deployment.
+ */
+const NO_PASSWORD =
+  "This deployment holds no password for the mailbox. An administrator has to store it as the mailbox credential (kind `mcp`, provider `mailbox`, key id `mailbox`) before mail can be read or sent.";
+
+/**
+ * The four tools, as the same shape a server would have answered `tools/list` with.
+ *
+ * THE DESCRIPTIONS CARRY THE THINGS A MODEL CANNOT SEE. Two of them matter enough to be spelled out
+ * rather than implied by a field name. The first is that a uid belongs to one mailbox: a uid read
+ * out of a listing of `Archive` names a different message in `INBOX`, and a model that carries one
+ * across will confidently open the wrong mail. The second is that this is ONE shared mailbox rather
+ * than the mailbox of whoever is asking. A Bot that believes it is reading the person's own mail
+ * will summarize somebody else's inbox to them without either party ever saying so.
+ */
+const TOOLS: readonly McpTool[] = Object.freeze([
+  {
+    name: "list_messages",
+    description: [
+      "List the newest messages in this deployment's mailbox, newest first: each one's uid, when it",
+      "arrived, who sent it, its subject and whether it has been read. No bodies: open one with",
+      "`read_message`.",
+      "",
+      "This is a single shared mailbox belonging to the deployment, not the mailbox of the person you are",
+      "talking to. Say whose it is if it is not obvious from the conversation, and never present its",
+      "contents as their own mail.",
+      "",
+      "`uid` values are per mailbox. A uid from a listing of one mailbox names a different message in",
+      "another, so pass the same `mailbox` to `read_message` that you listed.",
+    ].join("\n"),
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: {
+          type: "integer",
+          description: `How many messages to list. Default ${LIST_LIMIT.fallback}, at most ${LIST_LIMIT.max}.`,
+        },
+        mailbox: {
+          type: "string",
+          description: `Which mailbox to list. Default ${DEFAULT_MAILBOX}.`,
+        },
+      },
+    },
+  },
+  {
+    name: "read_message",
+    description: [
+      "Open one message and read it: its headers and its text, by the uid from `list_messages` or",
+      "`search_messages`.",
+      "",
+      "A long message is cut off and says so. Nothing is marked read, moved or deleted by opening it.",
+      "",
+      "Pass the same `mailbox` the uid came from. Uids are per mailbox, so a uid listed in one names a",
+      "different message in another.",
+    ].join("\n"),
+    inputSchema: {
+      type: "object",
+      properties: {
+        uid: {
+          type: "integer",
+          description: "The message's uid, from a listing or a search.",
+        },
+        mailbox: {
+          type: "string",
+          description: `The mailbox the uid came from. Default ${DEFAULT_MAILBOX}.`,
+        },
+      },
+      required: ["uid"],
+    },
+  },
+  {
+    name: "search_messages",
+    description: [
+      "Find messages whose subject, sender or text matches `query`, newest first. Answers with the same",
+      "header lines `list_messages` does; open one with `read_message`.",
+      "",
+      "The match is the mail server's own, which is a plain substring search rather than a search engine:",
+      "one or two distinctive words find more than a sentence does, and there is no ranking, no stemming",
+      "and no boolean syntax. A search that finds nothing says so.",
+    ].join("\n"),
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description:
+            "What to look for, matched against subject, sender and message text.",
+        },
+        limit: {
+          type: "integer",
+          description: `How many matches to return. Default ${SEARCH_LIMIT.fallback}, at most ${SEARCH_LIMIT.max}.`,
+        },
+        mailbox: {
+          type: "string",
+          description: `Which mailbox to search. Default ${DEFAULT_MAILBOX}.`,
+        },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "send_message",
+    description: [
+      "Send mail from this deployment's mailbox. It goes out immediately and there is nothing to recall,",
+      "so read what you are about to send back to the person first whenever the wording is theirs to",
+      "approve.",
+      "",
+      "To answer a message rather than start a new conversation, give `in_reply_to` as the uid of the",
+      "message you are answering. The reply is then threaded properly in the recipient's mail client, and",
+      '"Re: " is put in front of the subject if it is not already there. Without it the message opens a new',
+      "thread, however the subject is worded.",
+      "",
+      "The sender is always the deployment's own mailbox. There is no field for it, and the mail says who",
+      "it is from, so do not sign it as somebody else.",
+      "",
+      "Some deployments only allow mail to certain domains. If this is one of them, a recipient outside",
+      "them is refused, nothing is sent, and the refusal names the domain: report that plainly rather",
+      "than trying another address.",
+    ].join("\n"),
+    inputSchema: {
+      type: "object",
+      properties: {
+        to: {
+          type: "string",
+          description:
+            "The recipient's address. Several are separated by commas.",
+        },
+        subject: { type: "string", description: "The subject line." },
+        body: {
+          type: "string",
+          description: "The message itself, as plain text.",
+        },
+        in_reply_to: {
+          type: "integer",
+          description:
+            "The uid of the message this answers, so the reply threads. Omit for a new conversation.",
+        },
+        mailbox: {
+          type: "string",
+          description: `The mailbox the in_reply_to uid came from. Default ${DEFAULT_MAILBOX}.`,
+        },
+      },
+      required: ["to", "subject", "body"],
+    },
+  },
+]);
+
+/**
+ * Who this call is for, and which Bot is making it.
+ *
+ * The whole shared connection shape, all of it unused: there is no host to dial from a URL, no token
+ * to send, and the actor is not what authorizes this one. Declared anyway because it is the
+ * transport interface, and named here so the reason is written down where somebody would look for
+ * a missing check.
+ */
+type Connection = {
+  url: string;
+  token?: string;
+  actorId?: string;
+  botId?: string;
+};
+
+/**
+ * The list is static and needs neither a credential nor a configured mailbox.
+ *
+ * The four definitions are schemas in this file: nothing to discover, nobody to ask. Listing them
+ * without a mailbox configured is deliberate rather than an oversight. An administrator sets a
+ * connector up and grants its tools before, or instead of, the deployment ever having the secret,
+ * and a tool list that emptied itself when a variable was unset would revoke grants by accident.
+ */
+export async function listTools(): Promise<McpTool[]> {
+  return TOOLS.map((tool) => ({ ...tool }));
+}
+
+export const listNeedsCredential = false;
+
+const failure = (message: string): McpCallResult => ({
+  text: message,
+  isError: true,
+  truncated: false,
+});
+
+/** Success as a result, with the same visible cap the vendor transports use. */
+function asResult(text: string): McpCallResult {
+  if (text.length <= MAX_RESULT_CHARS) {
+    return { text, isError: false, truncated: false };
+  }
+  return {
+    text: `${text.slice(0, MAX_RESULT_CHARS)}\n\n[truncated: the tool returned ${text.length} characters]`,
+    isError: false,
+    truncated: true,
+  };
+}
+
+/** A string argument that was actually given, or nothing. Blank is not a value. */
+function stringArg(
+  args: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = args[key];
+  return typeof value === "string" && value.trim() !== ""
+    ? value.trim()
+    : undefined;
+}
+
+/**
+ * A whole number argument, or nothing, or a refusal.
+ *
+ * A string of digits counts. Models produce `"42"` for an integer field often enough that refusing
+ * it would be refusing a correct intention over a JSON type, and there is nothing ambiguous about
+ * it. Anything else that is not a positive whole number is refused rather than rounded or coerced:
+ * a uid is an identity, and `12.7` silently becoming 12 is a different message.
+ */
+function integerArg(
+  args: Record<string, unknown>,
+  key: string,
+): { value?: number; error?: string } {
+  const raw = args[key];
+  if (raw === undefined || raw === null || raw === "") return {};
+
+  const value =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string"
+        ? Number(raw.trim())
+        : Number.NaN;
+  if (!Number.isInteger(value) || value < 1) {
+    return { error: `\`${key}\` has to be a whole number, at least 1.` };
+  }
+  return { value };
+}
+
+/**
+ * How many messages one call returns, and whether the ask was cut down.
+ *
+ * Capped rather than refused, which is the opposite of what this file does with a malformed number,
+ * and the difference is what the number means. A malformed uid is a mistake only the model can fix;
+ * "give me 200 messages" is a perfectly clear intention that this tool simply does not serve, and
+ * refusing it would cost a whole extra round trip to be told a smaller number. The cap is SAID, in
+ * the answer, so a model that asked for 200 and got 50 knows there may be more rather than
+ * concluding the mailbox holds fifty messages.
+ */
+export function boundedLimit(
+  asked: number | undefined,
+  bounds: { fallback: number; max: number },
+): { limit: number; capped: boolean } {
+  if (asked === undefined) return { limit: bounds.fallback, capped: false };
+  if (asked > bounds.max) return { limit: bounds.max, capped: true };
+  return { limit: asked, capped: false };
+}
+
+/**
+ * The sentence for a uid that names nothing, wherever it was noticed.
+ *
+ * One function because there are two ways to arrive at it and they are the same fact to whoever is
+ * reading: the mailbox answered with no such message, or the number was never one a mailbox could
+ * hold. A model told two different things about one situation will try two different fixes.
+ */
+function noSuchMessage(uid: number, mailbox: string): string {
+  return `There is no message with uid ${uid} in ${mailbox}. Uids are per mailbox, so check the listing this one came from.`;
+}
+
+/**
+ * The lines that go under a listing when there is more than it showed.
+ *
+ * Two separate facts, and a call can have both. "There are 4000 messages and you are seeing 10" is
+ * about the mailbox; "50 is the most this tool will list" is about the tool, and only appears when
+ * somebody asked for more than that. Said, because a page of ten headers with nothing else on it
+ * reads to a model as the whole mailbox, and it will answer "you have ten messages" about a mailbox
+ * holding four thousand.
+ */
+function pageNotes(
+  page: MessagePage,
+  capped: boolean,
+  max: number,
+  what: string,
+): string[] {
+  const notes: string[] = [];
+  if (page.total > page.headers.length) {
+    notes.push(
+      `[showing ${page.headers.length} of ${page.total} ${what}, newest first.]`,
+    );
+  }
+  if (capped) {
+    notes.push(
+      `[${max} is the most this tool lists at once, so there may be more than these.]`,
+    );
+  }
+  return notes.length > 0 ? ["", ...notes] : [];
+}
+
+/** One message as a line in a listing. Empty fields are named, never left blank. */
+function headerLine(header: MessageHeader): string {
+  return [
+    `uid ${header.uid}`,
+    header.date ?? "no date",
+    `from ${header.from || "an unnamed sender"}`,
+    `"${header.subject || "(no subject)"}"`,
+    header.seen ? "read" : "unread",
+  ].join(" · ");
+}
+
+/**
+ * One message, opened.
+ *
+ * The cut is stated in the body's own terms (how long it was, where it stopped) rather than as a
+ * generic truncation note, because the model's next move depends on it: a message cut at 8000 of
+ * 9000 characters has almost certainly said what it came to say, and one cut at 8000 of 400000 has
+ * not. Same reasoning as `mcp.ts`'s cap note, applied one level down, since the whole result is
+ * capped again above this.
+ */
+function messageInWords(message: FullMessage, mailbox: string): string {
+  const lines = [
+    `uid ${message.uid} in ${mailbox}`,
+    `From: ${message.from || "an unnamed sender"}`,
+    `To: ${message.to || "nobody named"}`,
+    `Date: ${message.date ?? "not stated"}`,
+    `Subject: ${message.subject || "(no subject)"}`,
+    "",
+    message.body || "This message has no readable text.",
+  ];
+  if (message.bodyLength > MAX_BODY_CHARS) {
+    lines.push(
+      "",
+      `[truncated: the message body is ${message.bodyLength} characters and the first ${MAX_BODY_CHARS} are shown]`,
+    );
+  }
+  /*
+   * A different fact from a long body, and it has to be said separately.
+   *
+   * A cut body means this deployment holds the whole message and is showing part of it. A cut
+   * SOURCE means it never read the rest off the wire, so what is missing is missing everywhere:
+   * later parts, attachments, and anything a model might otherwise offer to go back for.
+   */
+  if (message.sourceTruncated) {
+    const weight =
+      message.sizeBytes === null
+        ? ""
+        : ` of the message's ${message.sizeBytes} bytes`;
+    lines.push(
+      `[only the first ${MAX_SOURCE_BYTES} bytes${weight} were read, so anything later in it, including attachments, was not seen]`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * The subject and the two headers that make a reply a reply.
+ *
+ * WHY THE ORIGINAL IS FETCHED RATHER THAN NAMED. Threading is done on `Message-ID`, and a model
+ * cannot know one: it is a header a person never sees. Given the uid of a message that exists, the
+ * ids come from the message itself, so a reply is threaded against something real or is not
+ * threaded at all.
+ *
+ * `References` is the original's own chain with the original appended, which is RFC 5322 §3.6.4's
+ * rule and the thing mail clients actually walk. A message with no `Message-ID` gets neither header:
+ * an `In-Reply-To` pointing at nothing is not a reply, and inventing an id would thread the answer
+ * into a conversation that does not exist.
+ *
+ * The subject keeps whatever the caller wrote and only gains a prefix. A reply marker already
+ * there is left alone rather than stacked, and the check is not just for English: `AW:` is German,
+ * `SV:` Swedish, `Antw:` Dutch and `Ref:` Italian, and a client that only knew `Re:` is how a thread
+ * ends up titled `Re: AW: Re: AW: the numbers`. Case-insensitive, and tolerant of the space some
+ * clients put before the colon.
+ */
+const REPLY_PREFIX = /^(re|aw|sv|antw|ref)\s*:/i;
+export function replyFrom(
+  original: Pick<FullMessage, "messageId" | "references">,
+  subject: string,
+): { subject: string; reply?: OutgoingMessage["reply"] } {
+  const prefixed = REPLY_PREFIX.test(subject.trim())
+    ? subject
+    : `Re: ${subject}`.trim();
+  if (!original.messageId) return { subject: prefixed };
+  return {
+    subject: prefixed,
+    reply: {
+      messageId: original.messageId,
+      references: [...original.references, original.messageId],
+    },
+  };
+}
+
+/**
+ * A sentence with the password taken out of it, in every spelling it can appear in.
+ *
+ * Belt and braces over a rule already kept: imapflow is built with `logger: false` and nothing in
+ * this deployment prints the secret. What this covers is the sentence a SERVER wrote. Both protocols
+ * quote the offending command back on a failed login, and nodemailer appends the raw SMTP reply to
+ * its error message, so the credential can arrive here inside somebody else's words. That text goes
+ * into an audit row and in front of a model, and neither is a place for the mailbox password.
+ *
+ * THE BASE64 FORMS ARE NOT PARANOIA, they are the common case. Neither client prefers plaintext
+ * `LOGIN`: imapflow authenticates with `AUTH=PLAIN` when the server offers it and falls back to
+ * `AUTH=LOGIN`, and both put the credential on the wire base64-encoded. So a quoted command carries
+ * `base64("\0user\0password")` or `base64(password)` rather than the password as typed, and a
+ * redaction that only knew the plaintext would pass it through unchanged while looking like it
+ * worked.
+ *
+ * A short or empty password is skipped rather than replaced everywhere, since replacing a
+ * one-character string would redact half the alphabet out of an unrelated message.
+ */
+export function redacted(
+  message: string,
+  password: string | null,
+  user?: string,
+): string {
+  if (!password || password.length < 4) return message;
+
+  const base64 = (value: string) =>
+    Buffer.from(value, "utf8").toString("base64");
+  const forms = [
+    password,
+    // AUTH=LOGIN sends the password on its own line.
+    base64(password),
+    // AUTH=PLAIN sends authzid, authcid and password as one NUL-separated blob.
+    ...(user ? [base64(`\u0000${user}\u0000${password}`)] : []),
+  ];
+
+  let scrubbed = message;
+  for (const form of forms) {
+    if (form.length < 4) continue;
+    scrubbed = scrubbed.split(form).join("[redacted]");
+  }
+  return scrubbed;
+}
+
+/**
+ * The recipient domains this deployment will not send to, out of a `to` field.
+ *
+ * Returned rather than thrown, and returned as the DOMAINS rather than as a yes or no, because the
+ * refusal has to name what was wrong: a model told only that the recipient was refused will try
+ * another address, and one told the domain will say plainly that this deployment does not mail
+ * outside it.
+ *
+ * `to` is what the model wrote, so this parses defensively: comma-separated, each part either a bare
+ * address or `Name <address>`. Anything with no `@`, or nothing after it, is reported as an offender
+ * too, because an unparseable recipient is not a recipient this list has cleared, and letting it
+ * through to be somebody else's validation error would be a hole in a safety check.
+ *
+ * An empty allowlist means unrestricted and is answered before any parsing.
+ */
+export function refusedRecipients(
+  to: string,
+  allowed: ReadonlySet<string>,
+): string[] {
+  if (allowed.size === 0) return [];
+
+  const refused: string[] = [];
+  for (const part of to.split(",")) {
+    const trimmed = part.trim();
+    if (trimmed === "") continue;
+    const angled = /<([^>]*)>/.exec(trimmed);
+    const address = (angled ? angled[1] : trimmed).trim();
+    const at = address.lastIndexOf("@");
+    const domain = at === -1 ? "" : address.slice(at + 1).toLowerCase();
+    if (domain === "" || !allowed.has(domain)) {
+      refused.push(domain === "" ? address : domain);
+    }
+  }
+  return [...new Set(refused)];
+}
+
+/**
+ * Call one tool.
+ *
+ * The grant and the policy are already settled by the time anything gets here: `plugins/store.ts`
+ * checks what this Bot was given, evaluates the policy against the tool's effect, and writes the
+ * audit row, exactly as it does for a vendor's server. There is no second path to the mailbox and
+ * nothing here re-decides any of that.
+ *
+ * Nothing thrown escapes. A mail server that refused, timed out or answered nonsense comes back as
+ * an `isError` result rather than as a throw, which is what the vendor transports do and what
+ * `plugins/tools.ts` expects: it prefixes the sentence with "The vendor reported an error: " and the
+ * sentence survives intact, which is the part that matters to whoever reads the transcript.
+ */
+export async function callTool(
+  _connection: Connection,
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<McpCallResult> {
+  const access = installed;
+  if (!access) return failure(NOT_CONFIGURED);
+
+  let password: string | null = null;
+  try {
+    password = await access.password();
+    if (!password) return failure(NO_PASSWORD);
+
+    const clients = (access.clients ?? createMailboxClients)(
+      access.config,
+      password,
+    );
+    const mailbox = stringArg(args, "mailbox") ?? DEFAULT_MAILBOX;
+
+    if (toolName === "list_messages") {
+      const asked = integerArg(args, "limit");
+      if (asked.error) return failure(asked.error);
+      const { limit, capped } = boundedLimit(asked.value, LIST_LIMIT);
+
+      const page = await clients.withSession((session) =>
+        session.recent(mailbox, limit),
+      );
+      if (page.headers.length === 0) {
+        // Said in words rather than returned as an empty string: an empty result reads to a model
+        // as "the tool had nothing to say" and gets filled in from memory.
+        return asResult(`There are no messages in ${mailbox}.`);
+      }
+      return asResult(
+        [
+          ...page.headers.map((header) => `- ${headerLine(header)}`),
+          ...pageNotes(page, capped, LIST_LIMIT.max, `messages in ${mailbox}`),
+        ].join("\n"),
+      );
+    }
+
+    if (toolName === "read_message") {
+      const uid = integerArg(args, "uid");
+      if (uid.error) return failure(uid.error);
+      if (uid.value === undefined) {
+        return failure(
+          "Say which message to read, by the uid from list_messages or search_messages.",
+        );
+      }
+      // A number no mailbox could hold is a message that is not there, and is answered as one
+      // rather than dialled and turned into a sequence-set complaint. See MAX_UID.
+      if (uid.value > MAX_UID) {
+        return failure(noSuchMessage(uid.value, mailbox));
+      }
+
+      const message = await clients.withSession((session) =>
+        session.message(mailbox, uid.value as number),
+      );
+      if (!message) {
+        return failure(noSuchMessage(uid.value, mailbox));
+      }
+      return asResult(messageInWords(message, mailbox));
+    }
+
+    if (toolName === "search_messages") {
+      const query = stringArg(args, "query");
+      if (!query) return failure("Say what to search the mailbox for.");
+      const asked = integerArg(args, "limit");
+      if (asked.error) return failure(asked.error);
+      const { limit, capped } = boundedLimit(asked.value, SEARCH_LIMIT);
+
+      const page = await clients.withSession((session) =>
+        session.search(mailbox, query, limit),
+      );
+      if (page.headers.length === 0) {
+        return asResult(
+          `Nothing in ${mailbox} matches "${query}". There is nothing here to answer from.`,
+        );
+      }
+      return asResult(
+        [
+          ...page.headers.map((header) => `- ${headerLine(header)}`),
+          ...pageNotes(page, capped, SEARCH_LIMIT.max, "matches"),
+        ].join("\n"),
+      );
+    }
+
+    if (toolName === "send_message") {
+      const to = stringArg(args, "to");
+      if (!to) return failure("Say who the message is to.");
+      const subject = stringArg(args, "subject");
+      if (!subject) return failure("A message needs a subject.");
+      const body = stringArg(args, "body");
+      if (!body) return failure("A message needs something in it.");
+
+      /*
+       * WHERE IT IS GOING IS DECIDED BEFORE ANYTHING IS DIALLED.
+       *
+       * First, so a refused recipient costs no connection and touches no mailbox: this is the check
+       * that stands between a Bot that was talked into something by the mail it just read and an
+       * address outside the deployment. Naming the domain rather than the address, because the
+       * domain is the thing the allowlist is written about and the thing an administrator would
+       * change.
+       */
+      const refused = refusedRecipients(
+        to,
+        access.config.allowedRecipientDomains,
+      );
+      if (refused.length > 0) {
+        return failure(
+          `This deployment only sends mail to ${[...access.config.allowedRecipientDomains].sort().join(", ")}, and ${refused.join(", ")} is not among them. Nothing was sent. An administrator sets MAILBOX_ALLOWED_RECIPIENT_DOMAINS.`,
+        );
+      }
+
+      const inReplyTo = integerArg(args, "in_reply_to");
+      if (inReplyTo.error) return failure(inReplyTo.error);
+      // The same answer a uid that is not there gets, for the same reason as `read_message`, and
+      // with the same promise that nothing was sent.
+      if (inReplyTo.value !== undefined && inReplyTo.value > MAX_UID) {
+        return failure(
+          `There is no message with uid ${inReplyTo.value} in ${mailbox}, so there is nothing to reply to. Nothing was sent.`,
+        );
+      }
+
+      let outgoing: OutgoingMessage = { to, subject, body };
+      if (inReplyTo.value !== undefined) {
+        const original = await clients.withSession((session) =>
+          session.message(mailbox, inReplyTo.value as number),
+        );
+        /*
+         * Refused rather than sent as a new message. A model that asked for a reply and got an
+         * unthreaded mail to the same person has been told the wrong thing about what it did, and
+         * the recipient sees an answer that appears to be about nothing.
+         */
+        if (!original) {
+          return failure(
+            `There is no message with uid ${inReplyTo.value} in ${mailbox}, so there is nothing to reply to. Nothing was sent.`,
+          );
+        }
+        const threaded = replyFrom(original, subject);
+        outgoing = {
+          to,
+          subject: threaded.subject,
+          body,
+          ...(threaded.reply ? { reply: threaded.reply } : {}),
+        };
+      }
+
+      const sent = await clients.send(outgoing);
+      return asResult(
+        [
+          `Sent to ${to}, subject "${outgoing.subject}".`,
+          outgoing.reply
+            ? "It threads as a reply to that message."
+            : "It starts a new thread.",
+          sent.messageId ? `Message id ${sent.messageId}.` : null,
+        ]
+          .filter((one): one is string => one !== null)
+          .join(" "),
+      );
+    }
+
+    return failure(
+      `${toolName} is not a tool Mailbox implements. The stored tool list is out of date; refresh it on the Plugins page.`,
+    );
+  } catch (error) {
+    /*
+     * The mail server's own sentence, scrubbed of the password and nothing else.
+     *
+     * It is the most useful thing available, since "Invalid credentials", "Mailbox does not exist"
+     * and "Relay access denied" each name a different fix, and rewording it here would turn a
+     * specific failure into a vague one. Capped, because a failure is not a promise about length.
+     */
+    const message =
+      error instanceof MailboxError || error instanceof Error
+        ? error.message
+        : String(error);
+    return failure(
+      redacted(message, password, access.config.user).slice(0, 400),
+    );
+  }
+}
