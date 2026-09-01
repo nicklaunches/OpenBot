@@ -97,14 +97,31 @@ Every one of them takes two arguments about where to look, and they are differen
 - **`folder`** is an IMAP folder inside that account, such as `INBOX`, `Sent` or `Archive`, and it
   defaults to `INBOX`.
 
-An address in `folder` is refused before anything is dialled, saying to pass it as `account`
-instead, and so is the part before the @ of a configured account. Neither is a hypothetical. A
-smaller model given a `mailbox` argument and an `account` argument put the address in the first one,
-was answered "Character not allowed in mailbox name" by the IMAP server, and never tried the second;
-refused that, it retried with `support` and then `webmaster`, which are the local parts of two
-configured accounts, and was answered "Mailbox doesn't exist: support". The argument is named
-`folder`, says in its own description that it is neither an address nor half of one, and is listed
-after `account` so that is the argument a model meets first.
+**A configured address in `folder` is adopted rather than refused.** If the value is one of this
+deployment's own accounts, and `account` is either unset or the same address, it is taken as the
+account, the folder falls back to `INBOX`, and the answer opens with one line saying so: "[folder
+took the address support@example.com; it was used as account, reading INBOX.]" There is exactly one
+mailbox that value can mean and the model named it, so refusing would spend a whole turn teaching
+vocabulary before any work happens, and live runs show the mistake on the first mailbox call of a
+turn. The note teaches the same lesson on the way past.
+
+Two neighbouring cases are still refused before anything is dialled, because neither is unambiguous:
+
+- **An address in `folder` that is not a configured account.** There is nothing to adopt, so the
+  refusal says to pass it as `account` instead.
+- **`folder` holding one configured address while `account` names a different one.** Two arguments
+  naming two mailboxes is a model that has lost track of which it is reading. The refusal names
+  both.
+
+**The part before the @ of a configured account is refused too**, and deliberately not adopted:
+`support` is not an address, and a folder genuinely called `support` can exist.
+
+None of this is hypothetical. A smaller model given a `mailbox` argument and an `account` argument
+put the address in the first one, was answered "Character not allowed in mailbox name" by the IMAP
+server, and never tried the second; refused that, it retried with `support` and then `webmaster`,
+which are the local parts of two configured accounts, and was answered "Mailbox doesn't exist:
+support". The argument is named `folder`, says in its own description that it is neither an address
+nor half of one, and is listed after `account` so that is the argument a model meets first.
 
 A folder that genuinely is not there is answered with the folders that are: "No folder named
 Newsletters in support@example.com. Folders here: INBOX, Sent, Archive. The account is chosen by

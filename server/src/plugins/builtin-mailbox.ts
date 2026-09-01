@@ -766,6 +766,57 @@ export function selectFolder(
 }
 
 /**
+ * Which account and which folder, together, because the interesting case is a mistake across both.
+ *
+ * THE ADOPTION. A model that puts a configured address in `folder` has said something unambiguous:
+ * there is exactly one mailbox it can mean, and it named it. Refusing that costs a whole turn to
+ * learn a vocabulary lesson, and live runs show the FIRST mailbox call of a turn making this
+ * mistake, so the lesson is paid for before any work happens. So the address is taken as the
+ * account, the folder falls back to {@link DEFAULT_FOLDER}, and the answer says what was done. The
+ * note teaches the same lesson the refusal did, on the way past rather than instead of the work.
+ *
+ * WHAT IS STILL REFUSED, because neither is unambiguous:
+ *
+ * - An address in `folder` that is NOT a configured account. There is nothing to adopt: the model
+ *   is asking for a mailbox this deployment does not have, and guessing which one it meant would
+ *   read somebody else's mail to answer a question about a mailbox that is not there.
+ * - `folder` holding one configured address while `account` names a different one. Two arguments
+ *   naming two mailboxes is a model that has lost track of which it is reading, and picking either
+ *   would be picking for it. The refusal names both.
+ *
+ * The local-part refusal in {@link selectFolder} is deliberately left alone. `support` is not an
+ * address, and a folder genuinely called `support` can exist, so adopting it would be guessing
+ * where the address case is certain.
+ */
+export function selectMailbox(
+  args: Record<string, unknown>,
+  users: readonly string[],
+): { account?: string; folder?: string; note?: string; error?: string } {
+  const askedFolder = stringArg(args, "folder") ?? stringArg(args, "mailbox");
+  const adopted = askedFolder?.toLowerCase();
+
+  if (adopted !== undefined && users.includes(adopted)) {
+    const askedAccount = stringArg(args, "account")?.toLowerCase();
+    if (askedAccount !== undefined && askedAccount !== adopted) {
+      return {
+        error: `folder is ${askedFolder}, which is the account ${adopted}, while account is ${askedAccount}. Those are two different mailboxes and this call names no folder at all. Pass the one you mean as \`account\` and leave \`folder\` unset. Nothing was read and nothing was sent.`,
+      };
+    }
+    return {
+      account: adopted,
+      folder: DEFAULT_FOLDER,
+      note: `[folder took the address ${adopted}; it was used as account, reading ${DEFAULT_FOLDER}.]`,
+    };
+  }
+
+  const account = selectAccount(args, users);
+  if (account.error || !account.account) return { error: account.error };
+  const folder = selectFolder(args, users);
+  if (folder.error || !folder.folder) return { error: folder.error };
+  return { account: account.account, folder: folder.folder };
+}
+
+/**
  * Call one tool.
  *
  * The grant and the policy are already settled by the time anything gets here: `plugins/store.ts`
@@ -786,18 +837,30 @@ export async function callTool(
   const access = installed;
   if (!access) return failure(NOT_CONFIGURED);
 
-  const chosen = selectAccount(args, access.config.users);
-  if (chosen.error || !chosen.account) {
+  const chosen = selectMailbox(args, access.config.users);
+  if (chosen.error || !chosen.account || !chosen.folder) {
     return failure(chosen.error ?? NOT_CONFIGURED);
   }
-  const account = chosen.account;
+  const { account, folder, note } = chosen;
 
-  const asked = selectFolder(args, access.config.users);
-  if (asked.error || !asked.folder) {
-    return failure(asked.error ?? NOT_CONFIGURED);
-  }
-  const folder = asked.folder;
+  const result = await runTool(access, account, folder, toolName, args);
+  if (!note) return result;
+  /*
+   * The note rides on the answer rather than replacing it. A model that is told what it did wrong
+   * AND handed the mail it asked for learns the argument without spending a turn on the lesson,
+   * which is the whole point of adopting the address instead of refusing it.
+   */
+  return { ...result, text: `${note}\n${result.text}` };
+}
 
+/** The work itself, once the account and the folder are settled. */
+async function runTool(
+  access: MailboxAccess,
+  account: string,
+  folder: string,
+  toolName: string,
+  args: Record<string, unknown>,
+): Promise<McpCallResult> {
   let password: string | null = null;
   try {
     password = await access.password(account);

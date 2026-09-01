@@ -26,6 +26,7 @@ import {
   replyFrom,
   selectAccount,
   selectFolder,
+  selectMailbox,
   useMailbox,
 } from "../src/plugins/builtin-mailbox";
 import { MAX_RESULT_CHARS } from "../src/plugins/mcp";
@@ -521,12 +522,14 @@ describe("several accounts", () => {
   });
 
   test("refuses an address in `folder` on the write tool too, sending nothing", async () => {
+    // An address this deployment does not have, so there is nothing to adopt. A configured one is
+    // taken as the account instead: see the adoption cases below.
     const { calls } = recordingMailbox();
     const result = await callTool(CONNECTION, "send_message", {
       to: "dana@example.test",
       subject: "s",
       body: "b",
-      folder: "sales@example.test",
+      folder: "billing@example.test",
       in_reply_to: 42,
     });
 
@@ -553,6 +556,81 @@ describe("several accounts", () => {
     expect(address.text).toContain("Pass the address as `account` instead");
   });
 
+  test("takes a configured address out of `folder` and reads that account's INBOX", async () => {
+    /*
+     * The mistake, adopted rather than refused. A model that put a configured address in `folder`
+     * has said something unambiguous: there is one mailbox it can mean and it named it. Live runs
+     * show this on the FIRST mailbox call of a turn, so refusing it spends the turn on a vocabulary
+     * lesson before any work happens.
+     */
+    const { calls, built } = recordingMailbox();
+    const result = await callTool(CONNECTION, "list_messages", {
+      folder: "Sales@Example.TEST",
+    });
+
+    expect(result.isError).toBe(false);
+    expect(built.map((one) => one.account)).toEqual(["sales@example.test"]);
+    // The folder falls back to INBOX, because the argument that named one was spent on the account.
+    expect(calls).toEqual([{ method: "recent", mailbox: "INBOX", limit: 10 }]);
+    // The lesson is taught on the way past rather than instead of the work.
+    expect(result.text.split("\n")[0]).toBe(
+      "[folder took the address sales@example.test; it was used as account, reading INBOX.]",
+    );
+    expect(result.text).toContain("uid 42");
+  });
+
+  test("adopts the address on the write path too, threading and sending from that account", async () => {
+    const { calls, built } = recordingMailbox();
+    const result = await callTool(CONNECTION, "send_message", {
+      to: "dana@example.test",
+      subject: "The Friday numbers",
+      body: "Friday it is.",
+      in_reply_to: 42,
+      folder: "sales@example.test",
+    });
+
+    expect(result.isError).toBe(false);
+    expect(built.map((one) => one.account)).toEqual(["sales@example.test"]);
+    // The original is fetched from the adopted account's INBOX, and the reply goes out from it.
+    expect(calls[0]).toEqual({ method: "message", mailbox: "INBOX", uid: 42 });
+    expect(calls[1]?.method).toBe("send");
+    expect(result.text).toContain(
+      "[folder took the address sales@example.test; it was used as account, reading INBOX.]",
+    );
+    expect(result.text).toContain("Sent from sales@example.test");
+  });
+
+  test("adopting is not overriding: the same address in both arguments is fine", async () => {
+    const { built } = recordingMailbox();
+    const result = await callTool(CONNECTION, "list_messages", {
+      folder: "sales@example.test",
+      account: "sales@example.test",
+    });
+
+    expect(result.isError).toBe(false);
+    expect(built.map((one) => one.account)).toEqual(["sales@example.test"]);
+  });
+
+  test("refuses two arguments naming two different mailboxes, naming both", async () => {
+    /*
+     * Nothing to adopt: a model that named one mailbox in `folder` and another in `account` has
+     * lost track of which it is reading, and picking either would be picking for it.
+     */
+    const { calls, built, unlocked } = recordingMailbox();
+    const result = await callTool(CONNECTION, "list_messages", {
+      folder: "sales@example.test",
+      account: "bot@example.test",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("folder is sales@example.test");
+    expect(result.text).toContain("account is bot@example.test");
+    expect(result.text).toContain("Nothing was read and nothing was sent.");
+    expect(calls).toEqual([]);
+    expect(built).toEqual([]);
+    expect(unlocked).toEqual([]);
+  });
+
   test("refuses an account's local part in `folder`, before anything is dialled", async () => {
     /*
      * The retry after the @ guard fired, as it actually happened: refused `support@example.test`,
@@ -572,6 +650,32 @@ describe("several accounts", () => {
     expect(calls).toEqual([]);
     expect(built).toEqual([]);
     expect(unlocked).toEqual([]);
+  });
+
+  test("resolves the two arguments together, on its own", () => {
+    const users = ["bot@example.test", "sales@example.test"];
+    expect(selectMailbox({}, users)).toEqual({
+      account: "bot@example.test",
+      folder: "INBOX",
+    });
+    expect(selectMailbox({ folder: "Archive" }, users)).toEqual({
+      account: "bot@example.test",
+      folder: "Archive",
+    });
+    expect(selectMailbox({ folder: " SALES@example.test " }, users)).toEqual({
+      account: "sales@example.test",
+      folder: "INBOX",
+      note: "[folder took the address sales@example.test; it was used as account, reading INBOX.]",
+    });
+    // An address this deployment does not have has nothing to adopt, so the refusal stands.
+    expect(
+      selectMailbox({ folder: "billing@example.test" }, users).error,
+    ).toContain("looks like an email address");
+    // A folder named like an account's local part is still refused: `support` is not an address,
+    // and a folder genuinely called that can exist.
+    expect(selectMailbox({ folder: "sales" }, users).error).toContain(
+      "is the account sales@example.test, not a folder",
+    );
   });
 
   test("picks the folder out of the arguments, on its own", () => {
