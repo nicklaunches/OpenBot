@@ -242,7 +242,8 @@ skills:
       (owner nicklaunches, repo growth-hacking), unless the person names a different repository. List what is open, then for each
       ticket read the full thread, check the claim against the repository's files or commit
       history where they can settle it, and classify it as an order, bug, question, or complaint.
-      Draft a response for each that needs one, factual and specific to the ticket. Post nothing
+      Draft a response for each that needs one, factual and specific to the ticket. You may set the
+      assignee or labels on a ticket with issue_write once the person confirms the triage. Post nothing
       without explicit approval in this conversation; a comment goes out only after a person says
       so. Tickets from paying customers are flagged urgent and listed first.
     tools:
@@ -252,6 +253,7 @@ skills:
       - github/get_file_contents
       - github/list_commits
       - github/add_issue_comment
+      - github/issue_write
 
   - slug: check-mail
     title: Check the mailboxes
