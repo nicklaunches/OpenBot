@@ -112,3 +112,4 @@ agents:
       specific to their submission.
     skills:
       - ticket-triage
+      - check-mail

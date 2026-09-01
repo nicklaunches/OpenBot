@@ -252,3 +252,16 @@ skills:
       - github/get_file_contents
       - github/list_commits
       - github/add_issue_comment
+
+  - slug: check-mail
+    title: Check the webmaster mailbox
+    summary: Read and search webmaster@nicklaunches.com; draft replies for approval before sending.
+    instructions: >-
+      Use the mailbox tool on your computer for anything about webmaster@nicklaunches.com. Run it
+      with the shell: "python3 /workspace/.mail/mail.py list 10" for the newest messages,
+      "read <uid>" for one message, "search <text>" to find by subject or sender. Never read the
+      credentials file at /workspace/.mail/credentials and never print its contents; the tool
+      handles sign-in itself. Sending is "send <to> <subject>" with the body on stdin, and it
+      happens only after a person approves the exact recipient, subject, and body in this
+      conversation. Quote the message you are answering when you draft a reply.
+    tools: []
