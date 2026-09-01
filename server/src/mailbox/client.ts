@@ -355,9 +355,16 @@ export async function withDeadline<T>(
  *
  * Built per call rather than once, because it holds the password. Nothing here caches a connection,
  * a transport or the secret itself beyond the call that asked for it.
+ *
+ * `account` is one of `config.users`, already chosen and checked by the caller, and it is both what
+ * the two protocols authenticate as and what the mail is from. It is a parameter rather than a
+ * field of the configuration because a deployment's hosts are one thing and the account a
+ * particular call is working in is another: the same hosts serve every account, and which one this
+ * client speaks for is decided per call.
  */
 export function createMailboxClients(
   config: MailboxConfig,
+  account: string,
   password: string,
 ): MailboxClients {
   /**
@@ -374,7 +381,7 @@ export function createMailboxClients(
       // Implicit TLS, always. STARTTLS is negotiated in the clear, so a server that answers without
       // it gets this deployment's mailbox password over a plain socket.
       secure: true,
-      auth: { user: config.user, pass: password },
+      auth: { user: account, pass: password },
       connectionTimeout: TIMEOUT_MS,
       greetingTimeout: TIMEOUT_MS,
       socketTimeout: TIMEOUT_MS,
@@ -554,7 +561,7 @@ export function createMailboxClients(
         port: config.smtpPort,
         // Implicit TLS on 465, for the same reason IMAP uses it: SMTP AUTH sends the password.
         secure: true,
-        auth: { user: config.user, pass: password },
+        auth: { user: account, pass: password },
         connectionTimeout: TIMEOUT_MS,
         greetingTimeout: TIMEOUT_MS,
         socketTimeout: TIMEOUT_MS,
@@ -564,9 +571,9 @@ export function createMailboxClients(
         const sent = await withDeadline(
           () =>
             transport.sendMail({
-              // The deployment's own mailbox, never an address from the arguments. A `from` a model
-              // could name is a Bot sending mail as somebody else.
-              from: config.user,
+              // The selected account, never an address from the arguments. A `from` a model could
+              // name is a Bot sending mail as somebody else.
+              from: account,
               to: message.to,
               subject: message.subject,
               text: message.body,

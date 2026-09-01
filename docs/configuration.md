@@ -59,7 +59,8 @@ at `agent-langgraph` on a laptop.
 | `OPENBOT_GENERATIVE_UI` | unset (capability off)              | `true` or `1` lets a Bot answer with an interface it wrote itself. |
 | `MAILBOX_IMAP_HOST`  | unset                              | IMAP server for the deployment's mailbox. Needed together with the SMTP host and the user; see [mailbox.md](mailbox.md). |
 | `MAILBOX_SMTP_HOST`  | unset                              | SMTP server the mailbox sends through. |
-| `MAILBOX_USER`       | unset                              | The account both protocols sign in as, and what mail is sent from. The password is not an environment variable: it is the `mailbox` credential in the vault. |
+| `MAILBOX_USERS`      | unset                              | Comma-separated addresses on those hosts, one per mailbox account. The first is the default account. Passwords are not environment variables: each is a vault credential keyed by the address. |
+| `MAILBOX_USER`       | unset                              | The singular this feature shipped with, still read as a list of one. Setting it together with `MAILBOX_USERS` refuses to start. |
 | `MAILBOX_IMAP_PORT`  | `993`                              | Implicit TLS. Set only for a server that listens elsewhere. |
 | `MAILBOX_SMTP_PORT`  | `465`                              | Implicit TLS. Set only for a server that listens elsewhere. |
 | `MAILBOX_ALLOWED_RECIPIENT_DOMAINS` | unset (anywhere)    | Comma-separated domains a Bot may send mail to. A policy rule cannot do this, because rules see a tool's name and effect and not its arguments; see [mailbox.md](mailbox.md). |

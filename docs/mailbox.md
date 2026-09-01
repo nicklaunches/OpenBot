@@ -1,19 +1,29 @@
 # Mailbox
 
-The Mailbox connector gives a Bot one mailbox: it can list what has arrived, open a message, search
+The Mailbox connector gives a Bot the deployment's mail: it can list what has arrived, open a message, search
 for one, and send mail, including a threaded reply. "Check the support mailbox and tell me what came
 in overnight" is a mailbox question, and so is "reply to Dana and say we will have it by Friday."
 
-There is exactly one mailbox and it belongs to the deployment. It is not the mailbox of whoever is
-asking, and no person connects an account to it. That is the difference from Google Drive or Notion,
-where each person consents for themselves and sees only their own; here everybody granted the tools
-reads the same mail. Decide that before granting it, because it is the whole of the access model.
+The mailbox belongs to the deployment. It is not the mailbox of whoever is asking, and no person
+connects an account to it. That is the difference from Google Drive or Notion, where each person
+consents for themselves and sees only their own; here everybody granted the tools reads the same
+mail. Decide that before granting it, because it is the whole of the access model.
+
+A deployment may configure several accounts on one pair of hosts, which is what a shared host gives
+you: `support@`, `sales@` and `billing@` are three mailboxes on one IMAP and one SMTP server, with a
+password each. Every tool takes an optional `account` to say which one to work in; leaving it out
+works in the first configured, the default.
+
+**Grants are per tool, not per account.** A Bot granted `list_messages` can list every configured
+account, and one granted `send_message` can send from any of them. There is no per-account grant and
+no way to give a Bot one mailbox out of three. If an account must stay out of a Bot's reach, do not
+configure it on this deployment.
 
 ## The prerequisite
 
 Two things, and both are an administrator's:
 
-1. **Configuration**, which says where the mailbox is (below).
+1. **Configuration**, which says where the mailbox is and which accounts are on it (below).
 2. **Grants**, which say which Bots may use it. Mailbox is a catalogue entry like any other, at
    `/admin/plugins/mailbox`, and enabling the entry hands no Bot anything. Each of the four tools is
    granted per Bot, so "may read the mail" and "may answer it" are two separate decisions.
@@ -29,36 +39,48 @@ way one would for any other irreversible action.
 | -------------------- | ------- | ----------------------------------------------------------------- |
 | `MAILBOX_IMAP_HOST`  | unset   | The IMAP server messages are read from.                           |
 | `MAILBOX_SMTP_HOST`  | unset   | The SMTP server mail is sent through.                             |
-| `MAILBOX_USER`       | unset   | The account both protocols sign in as, and what mail is sent from. |
+| `MAILBOX_USERS`      | unset   | Comma-separated addresses on those hosts. The first is the default account. |
+| `MAILBOX_USER`       | unset   | The singular this shipped with, read as a list of one. Both set refuses to start. |
 | `MAILBOX_IMAP_PORT`  | `993`   | Implicit TLS. Set only for a server that listens elsewhere.        |
 | `MAILBOX_SMTP_PORT`  | `465`   | Implicit TLS. Set only for a server that listens elsewhere.        |
 | `MAILBOX_ALLOWED_RECIPIENT_DOMAINS` | unset (anywhere) | Comma-separated domains a Bot may send to. See [Bounding where mail can go](#bounding-where-mail-can-go). |
 
-The three hosts-and-user variables are needed together. Set one or two and the server refuses to
+The three hosts-and-users variables are needed together. Set one or two and the server refuses to
 start, naming the ones that are missing, rather than booting with half a mailbox that fails at the
 first login, at run time, in front of somebody, with nothing but an authentication error from a
 server that will not say which half was wrong. Leave all three unset and the connector is still
 listed, still grantable, and every tool call answers with the sentence naming what to set.
 
+`MAILBOX_USERS` is a list, so `support@example.com,sales@example.com` is two accounts and
+`support@example.com` is one. The order matters: the first is the default. Addresses are lower-cased
+and deduplicated, and an entry that is not an address refuses to start, naming it, rather than
+becoming an account a model can select and nothing can unlock. `MAILBOX_USER` is still read as a
+list of one for a deployment that already had it; setting both refuses to start, because they are
+two answers to the same question.
+
 Both ports default to the implicit-TLS ones rather than the STARTTLS ones, so the connection is
 encrypted before the password is sent rather than negotiating for it in the clear.
 
-### The password is not an environment variable
+### The passwords are not environment variables
 
-It is the only secret in this feature, so it lives where this deployment's other secrets live: the
-encrypted credential vault. Store it at `/admin/credentials` as:
+They are the only secrets in this feature, so they live where this deployment's other secrets live:
+the encrypted credential vault. Store **one credential per account** at `/admin/credentials` as:
 
 - **kind** `mcp`, the vault's name for "the one token this deployment holds for this server", which
   is exactly what a mailbox password is: one secret, the deployment's, used for every Bot granted the
   tools, never anybody's own grant.
 - **provider** `mailbox`
-- **key id** `mailbox`
+- **key id** the address exactly as it is configured, lower-cased: `support@example.com`.
 
-Rotate it in the same place. The password is read from the vault at the moment a call needs it and
-thrown away after, so a rotation takes effect on the next tool call rather than on the next restart,
-and revoking it stops the tools within a call.
+So a deployment with three accounts holds three rows, each rotated and revoked on its own. An
+account with no stored password is refused by name, naming that account and the key id to store it
+under, while the accounts that do have one keep working.
 
-Nothing prints it. IMAP logging is off at the client, which matters because one of the commands it
+Rotate in the same place. A password is read from the vault at the moment a call needs it and thrown
+away after, so a rotation takes effect on the next tool call rather than on the next restart, and
+revoking it stops that account within a call.
+
+Nothing prints one. IMAP logging is off at the client, which matters because one of the commands it
 would log is the authentication one; and a failure sentence from a mail server that quoted the login
 back is scrubbed before it reaches an audit row, a transcript or a model. The scrub covers the
 base64 forms as well as the plaintext, because neither client sends the password as typed: IMAP
@@ -66,6 +88,12 @@ authenticates with `AUTH=PLAIN` or `AUTH=LOGIN`, both base64 on the wire, so a q
 carries an encoding of it rather than the password itself.
 
 ## The four tools
+
+Every one of them also takes `account`, which names one of the configured addresses and defaults to
+the first. An account this deployment does not have is refused before the vault is read and before
+anything is dialled, and the refusal lists the ones that exist. Every answer names the account it is
+about, so a turn that reads two of them cannot merge them: "showing 10 of 236 messages in INBOX of
+support@example.com, newest first."
 
 - **`list_messages`**: the newest messages in a mailbox, newest first: uid, date, sender, subject
   and whether it has been read. No bodies. `limit` defaults to 10 and is capped at 50; `mailbox`
@@ -80,10 +108,12 @@ carries an encoding of it rather than the password itself.
   and `Re: ` goes in front of the subject if it is not already there. Without it, the message opens a
   new thread however the subject is worded.
 
-The sender is always `MAILBOX_USER`. There is no field for it, so a Bot cannot send as somebody else.
+The sender is always the selected account, and the confirmation says which. There is no `from`
+field, so a Bot cannot send as somebody else.
 
-**Uids are per mailbox.** A uid from a listing of `Archive` names a different message in `INBOX`, so
-every tool that takes one also takes the `mailbox` it came from. A uid that is not there is refused
+**Uids are per mailbox, and a mailbox belongs to one account.** A uid from a listing of `Archive`
+names a different message in `INBOX`, and a uid from `support@`'s INBOX names a different message in
+`sales@`'s, so every tool that takes one also takes the `mailbox` and the `account` it came from. A uid that is not there is refused
 by name rather than guessed at, and for `send_message` nothing is sent.
 
 **Every result is bounded.** At most 512 KB of a message is read off the wire, so one mail with a
@@ -131,6 +161,10 @@ Nothing about a Mailbox tool call is special. It goes through `plugins/store.ts`
 connector: the Bot's grant is checked, the policy is evaluated with the tool's effect (`send_message`
 as a write, the other three as reads), an audit row is written, and only then is any mail server
 dialled. There is no second path to the mailbox and no bypass.
+
+The grant is per tool. It is not per account, and the policy engine cannot make it one, for the same
+reason it cannot bound recipients: a rule sees a tool call's name and effect, never its arguments.
+A Bot granted the mailbox tools reaches every configured account.
 
 The audit trail records every call, and for a failure it keeps the mail server's own sentence, which
 is usually the most useful thing available: "Invalid credentials", "Mailbox does not exist" and

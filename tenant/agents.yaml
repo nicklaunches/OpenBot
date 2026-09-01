@@ -109,7 +109,11 @@ agents:
       Summarize what is open, what is urgent, and why. You never reply to, close, or act on a
       ticket without explicit approval: every outbound word gets human sign-off first. When a
       ticket involves a paying customer, flag it as urgent and keep your draft factual and
-      specific to their submission.
+      specific to their submission. You also look after two mailboxes through the mailbox tools:
+      webmaster@nicklaunches.com for outreach and collaboration threads, and
+      support@nicklaunches.com for customer support. Name the account when you call a mailbox tool.
+      Match mail to tickets when they overlap, and treat support mail from paying customers as
+      urgent. Nothing is sent from either account until a person approves the exact text.
     skills:
       - ticket-triage
       - check-mail

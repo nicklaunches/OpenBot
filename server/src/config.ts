@@ -62,13 +62,14 @@ export type ComputerConfig =
   | SandboxComputerConfig;
 
 /**
- * The deployment's own mailbox: where it is and who it signs in as.
+ * The deployment's own mailbox: where it is and which accounts it signs in as.
  *
  * NO PASSWORD HERE, and that is the point of the shape. Everything in this file comes from the
  * environment, which means a `.env` file on a laptop, a compose file in a repository and whatever a
- * cluster hands a container as plain text. The mailbox password is the one secret in this feature,
- * so it lives where the other secrets this deployment holds live: the encrypted credential vault,
- * as the `mailbox` credential. See `plugins/builtin-mailbox.ts` for how it is resolved.
+ * cluster hands a container as plain text. The mailbox passwords are the only secrets in this
+ * feature, so they live where the other secrets this deployment holds live: the encrypted
+ * credential vault, one credential per account, keyed by the address. See
+ * `plugins/builtin-mailbox.ts` for how one is resolved.
  *
  * Both ports default to the implicit-TLS ones (993 and 465) rather than to the STARTTLS ones, so a
  * deployment that sets only the two hosts gets an encrypted connection rather than one that
@@ -79,8 +80,18 @@ export type MailboxConfig = {
   imapPort: number;
   smtpHost: string;
   smtpPort: number;
-  /** The account both protocols authenticate as, which is also what mail is sent from. */
-  user: string;
+  /**
+   * The accounts on these hosts, lower-cased and in the order they were configured.
+   *
+   * Never empty: a mailbox with no account is refused at start-up rather than carried around as a
+   * shape every caller has to check. The FIRST is the default, which is the one a tool call that
+   * named no account works in, so the order in `MAILBOX_USERS` is a decision rather than a detail.
+   *
+   * Several accounts, one set of hosts: this is the shared-hosting shape, where `support@`,
+   * `sales@` and `billing@` are all mailboxes on the same IMAP and SMTP servers with a password
+   * each. Each password is its own vault credential, keyed by the address.
+   */
+  users: readonly string[];
   /**
    * The domains a Bot may send to. Empty means anywhere, which is the default.
    *
@@ -896,22 +907,22 @@ function mailboxPort(
  * fails at the first login, at run time, in front of somebody, and the only evidence is an auth
  * failure from a server that will not say which half was wrong.
  *
- * The password is deliberately not read here. See {@link MailboxConfig}.
+ * The passwords are deliberately not read here. See {@link MailboxConfig}.
  */
 function mailboxConfig(environment: Environment): MailboxConfig | undefined {
   const imapHost = optional(environment, "MAILBOX_IMAP_HOST");
   const smtpHost = optional(environment, "MAILBOX_SMTP_HOST");
-  const user = optional(environment, "MAILBOX_USER");
-  if (!imapHost && !smtpHost && !user) return undefined;
+  const users = mailboxUsers(environment);
+  if (!imapHost && !smtpHost && users.length === 0) return undefined;
 
   const missing = [
     imapHost ? null : "MAILBOX_IMAP_HOST",
     smtpHost ? null : "MAILBOX_SMTP_HOST",
-    user ? null : "MAILBOX_USER",
+    users.length > 0 ? null : "MAILBOX_USERS",
   ].filter((name): name is string => name !== null);
   if (missing.length > 0) {
     throw new Error(
-      `${missing.join(", ")} must be set as well: a mailbox needs an IMAP host, an SMTP host and a user. Unset all three to switch the mailbox off.`,
+      `${missing.join(", ")} must be set as well: a mailbox needs an IMAP host, an SMTP host and at least one user. Unset all three to switch the mailbox off.`,
     );
   }
 
@@ -921,9 +932,56 @@ function mailboxConfig(environment: Environment): MailboxConfig | undefined {
     imapPort: mailboxPort(environment, "MAILBOX_IMAP_PORT", 993),
     smtpHost: smtpHost as string,
     smtpPort: mailboxPort(environment, "MAILBOX_SMTP_PORT", 465),
-    user: user as string,
+    users,
     allowedRecipientDomains: allowedRecipientDomains(environment),
   };
+}
+
+/**
+ * The accounts on this deployment's mail hosts, in the order they were written.
+ *
+ * `MAILBOX_USERS` is the list and its first entry is the default account. `MAILBOX_USER`, the
+ * singular this feature shipped with, is still read as a list of one, so a deployment that already
+ * has one does not have to be edited to keep working. Both set is refused rather than merged or
+ * silently preferred: they are two answers to the same question, and a deployment holding both has
+ * an intention nobody here can read.
+ *
+ * Lower-cased and deduplicated, because an address is case-insensitive and the address is also the
+ * key of the vault credential holding that account's password. `Support@` and `support@` written as
+ * two entries are one mailbox, and treating them as two would be a second account nothing can ever
+ * unlock.
+ *
+ * An entry that is not an address refuses to start, naming it. It would otherwise become an account
+ * a model can select, a credential key an administrator cannot guess, and a login failure at run
+ * time in front of somebody.
+ */
+function mailboxUsers(environment: Environment): string[] {
+  const list = optional(environment, "MAILBOX_USERS");
+  const legacy = optional(environment, "MAILBOX_USER");
+  if (list && legacy) {
+    throw new Error(
+      "MAILBOX_USERS and MAILBOX_USER are both set and they are the same setting. Keep MAILBOX_USERS, which holds the whole list, and unset MAILBOX_USER.",
+    );
+  }
+
+  const name = list ? "MAILBOX_USERS" : "MAILBOX_USER";
+  const entries = list
+    ? commaSeparated(environment, "MAILBOX_USERS")
+    : legacy
+      ? [legacy]
+      : [];
+
+  const users: string[] = [];
+  for (const entry of entries) {
+    if (!/^[^\s@,]+@[^\s@,]+$/.test(entry)) {
+      throw new Error(
+        `${name} entry "${entry}" must be an email address such as bot@example.com`,
+      );
+    }
+    const address = entry.toLowerCase();
+    if (!users.includes(address)) users.push(address);
+  }
+  return users;
 }
 
 /**

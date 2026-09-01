@@ -27,11 +27,17 @@ import { MAX_RESULT_CHARS, type McpCallResult, type McpTool } from "./mcp";
  * already passed the grant check and the policy decision in `plugins/store.ts`, and there is no
  * per-person narrowing left to do: the mailbox does not have somebody's half.
  *
- * THE PASSWORD IS NEVER IN THE ENVIRONMENT and never in an answer. The hosts and the user come from
- * `config.ts`; the password comes from the encrypted credential vault, as the `mailbox` credential,
- * resolved through {@link MailboxAccess.password} at the moment a call needs it and thrown away
- * after. {@link redacted} is the last line of that: a failure sentence from a mail server that
- * echoed the login back is scrubbed before anybody reads it.
+ * THE PASSWORD IS NEVER IN THE ENVIRONMENT and never in an answer. The hosts and the accounts come
+ * from `config.ts`; each account's password comes from the encrypted credential vault, as that
+ * account's own credential, resolved through {@link MailboxAccess.password} at the moment a call
+ * needs it and thrown away after. {@link redacted} is the last line of that: a failure sentence
+ * from a mail server that echoed the login back is scrubbed before anybody reads it.
+ *
+ * SEVERAL ACCOUNTS, ONE DEPLOYMENT. `support@`, `sales@` and `billing@` on the same shared host are
+ * one configuration with one host pair and a password each. Which one a call works in is the
+ * `account` argument, defaulting to the first configured. It changes nothing about the access
+ * model: the accounts are all the deployment's, the grant is still per tool rather than per
+ * account, and a Bot granted these tools reaches every one of them.
  *
  * It implements the same interface as every other transport, as module-level exports, because that
  * is the shape {@link ./transport} resolves: a `TransportKind` maps to a MODULE. Which is also why
@@ -48,8 +54,14 @@ import { MAX_RESULT_CHARS, type McpCallResult, type McpTool } from "./mcp";
  */
 export type MailboxAccess = {
   config: MailboxConfig;
-  /** The password from the vault, or null when this deployment holds none. */
-  password: () => Promise<string | null>;
+  /**
+   * That account's password from the vault, or null when this deployment holds none for it.
+   *
+   * Per account rather than per deployment, because a shared host gives each mailbox its own
+   * login. A deployment can hold the password for one account and not another, and that is a
+   * working deployment for the account it has: the answer names the account that is missing one.
+   */
+  password: (account: string) => Promise<string | null>;
   /**
    * How IMAP and SMTP are actually spoken. Defaults to imapflow and nodemailer.
    *
@@ -58,27 +70,39 @@ export type MailboxAccess = {
    * are the properties worth being sure about, and asserting them otherwise would need a reachable
    * mail server.
    */
-  clients?: (config: MailboxConfig, password: string) => MailboxClients;
+  clients?: (
+    config: MailboxConfig,
+    account: string,
+    password: string,
+  ) => MailboxClients;
 };
 
 /**
- * Which credential in the vault is the mailbox password.
+ * Which credential in the vault is one account's password.
  *
  * Here rather than at the one call site in `index.ts`, because it is a contract with two other
  * parties: the administrator who types these three values at `/admin/credentials`, and
  * `docs/mailbox.md`, which tells them to. Three strings agreeing across three places by convention
  * is how a deployment ends up holding the right secret under a key nothing reads.
  *
+ * THE KEY ID IS THE ADDRESS, which is what makes several accounts possible at all: one credential
+ * per configured address, so a rotation, a revocation and a missing password are each one
+ * account's rather than the whole mailbox's. Lower-cased on the way in, matching what `config.ts`
+ * stores, so an administrator who typed `Support@` and a caller who asked for `support@` reach the
+ * same row.
+ *
  * `mcp` is the kind because that is the vault's name for "the one token this deployment holds for
  * this server", which is the same kind a custom MCP server's own bearer token is stored under and
  * the same thing a mailbox password is: one secret, the deployment's, used for every Bot granted
  * the tools.
  */
-export const MAILBOX_CREDENTIAL = Object.freeze({
-  kind: "mcp",
-  provider: "mailbox",
-  keyId: "mailbox",
-} as const);
+export function mailboxCredentialFor(account: string): {
+  kind: "mcp";
+  provider: "mailbox";
+  keyId: string;
+} {
+  return { kind: "mcp", provider: "mailbox", keyId: account.toLowerCase() };
+}
 
 let installed: MailboxAccess | null = null;
 
@@ -121,18 +145,24 @@ const MAX_UID = 4_294_967_295;
  * rather than a missing connector, is how a deployment finds out.
  */
 const NOT_CONFIGURED =
-  "Mailbox is not configured. Set MAILBOX_IMAP_HOST, MAILBOX_SMTP_HOST, MAILBOX_USER and store the password as the mailbox credential.";
+  "Mailbox is not configured. Set MAILBOX_IMAP_HOST, MAILBOX_SMTP_HOST, MAILBOX_USERS and store each account's password as its mailbox credential.";
 
 /**
- * What a call answers when the hosts are configured and the vault holds no password.
+ * What a call answers when the hosts are configured and the vault holds no password for the account.
  *
  * Its own sentence rather than the one above, because it is a different job with a different fix: an
  * administrator has already set the three variables and has one step left, at a different screen.
  * Telling them to set variables they can see are already set is how a correct instruction gets read
  * as a broken deployment.
+ *
+ * IT NAMES THE ACCOUNT, and with several of them that is the whole content of the message. A
+ * deployment that stored `support@` and forgot `billing@` is working for one account and broken for
+ * the other, and a sentence saying only "the mailbox" would send an administrator to look at the
+ * credential that is already there.
  */
-const NO_PASSWORD =
-  "This deployment holds no password for the mailbox. An administrator has to store it as the mailbox credential (kind `mcp`, provider `mailbox`, key id `mailbox`) before mail can be read or sent.";
+function noPassword(account: string): string {
+  return `This deployment holds no password for the mailbox ${account}. An administrator has to store it as that account's mailbox credential (kind \`mcp\`, provider \`mailbox\`, key id \`${account}\`) before mail can be read or sent.`;
+}
 
 /**
  * The four tools, as the same shape a server would have answered `tools/list` with.
@@ -241,8 +271,9 @@ const TOOLS: readonly McpTool[] = Object.freeze([
       '"Re: " is put in front of the subject if it is not already there. Without it the message opens a new',
       "thread, however the subject is worded.",
       "",
-      "The sender is always the deployment's own mailbox. There is no field for it, and the mail says who",
-      "it is from, so do not sign it as somebody else.",
+      "The sender is always the account this call works in, which is one of the deployment's own",
+      "mailboxes. There is no field for it, and the mail says who it is from, so do not sign it as",
+      "somebody else.",
       "",
       "Some deployments only allow mail to certain domains. If this is one of them, a recipient outside",
       "them is refused, nothing is sent, and the refusal names the domain: report that plainly rather",
@@ -300,7 +331,49 @@ type Connection = {
  * and a tool list that emptied itself when a variable was unset would revoke grants by accident.
  */
 export async function listTools(): Promise<McpTool[]> {
-  return TOOLS.map((tool) => ({ ...tool }));
+  const users = installed?.config.users ?? null;
+  return TOOLS.map((tool) => withAccount(tool, users));
+}
+
+/**
+ * One tool definition, plus the `account` argument and the sentence explaining it.
+ *
+ * ADDED HERE RATHER THAN WRITTEN INTO {@link TOOLS} because the choices are a deployment's, not this
+ * file's. A model that is told the addresses can pick one; a model told only that an `account`
+ * argument exists has to guess at a string, and a guessed address is a refusal at best. The names
+ * are already in front of it in every listing this connector answers with, so naming them in the
+ * description reveals nothing a granted Bot could not already read.
+ *
+ * The generic wording is for the deployment with no mailbox configured, where the list is still
+ * answered (see {@link listTools}) and there are no addresses to name yet.
+ */
+function withAccount(tool: McpTool, users: readonly string[] | null): McpTool {
+  const configured = users && users.length > 0 ? users : null;
+  const choices = configured
+    ? `one of ${configured.join(", ")}`
+    : "one of the deployment's configured addresses";
+  const fallback = configured
+    ? `Default ${configured[0]}.`
+    : "Leave it out for the default one.";
+
+  const properties = {
+    ...((tool.inputSchema.properties as Record<string, unknown> | undefined) ??
+      {}),
+    account: {
+      type: "string",
+      description: `Which mailbox account to work in: ${choices}. ${fallback}`,
+    },
+  };
+
+  return {
+    ...tool,
+    description: [
+      tool.description,
+      "",
+      `The mailbox has more than one account on some deployments. \`account\` says which to work in, ${choices}, and ${configured ? `leaving it out works in ${configured[0]}` : "leaving it out works in the default one"}. A uid, like a mailbox name, belongs to one account: do not carry one across.`,
+    ].join("\n"),
+    inputSchema: { ...tool.inputSchema, properties },
+  };
 }
 
 export const listNeedsCredential = false;
@@ -381,14 +454,26 @@ export function boundedLimit(
 }
 
 /**
+ * How a mailbox is named in an answer: the folder, and which account's folder it is.
+ *
+ * One function so every sentence says it the same way. The account is in all of them rather than
+ * only in the ambiguous ones, because a model reading "showing 10 of 236 messages in INBOX" across
+ * two accounts in one turn has no way to tell which INBOX either page came from, and will merge
+ * them.
+ */
+function where(mailbox: string, account: string): string {
+  return `${mailbox} of ${account}`;
+}
+
+/**
  * The sentence for a uid that names nothing, wherever it was noticed.
  *
  * One function because there are two ways to arrive at it and they are the same fact to whoever is
  * reading: the mailbox answered with no such message, or the number was never one a mailbox could
  * hold. A model told two different things about one situation will try two different fixes.
  */
-function noSuchMessage(uid: number, mailbox: string): string {
-  return `There is no message with uid ${uid} in ${mailbox}. Uids are per mailbox, so check the listing this one came from.`;
+function noSuchMessage(uid: number, place: string): string {
+  return `There is no message with uid ${uid} in ${place}. Uids are per mailbox, so check the listing this one came from.`;
 }
 
 /**
@@ -440,9 +525,9 @@ function headerLine(header: MessageHeader): string {
  * not. Same reasoning as `mcp.ts`'s cap note, applied one level down, since the whole result is
  * capped again above this.
  */
-function messageInWords(message: FullMessage, mailbox: string): string {
+function messageInWords(message: FullMessage, place: string): string {
   const lines = [
-    `uid ${message.uid} in ${mailbox}`,
+    `uid ${message.uid} in ${place}`,
     `From: ${message.from || "an unnamed sender"}`,
     `To: ${message.to || "nobody named"}`,
     `Date: ${message.date ?? "not stated"}`,
@@ -593,6 +678,37 @@ export function refusedRecipients(
 }
 
 /**
+ * Which account this call works in.
+ *
+ * Unset is the first configured account, which is what makes `account` an argument a model may
+ * ignore: the common deployment has one mailbox and never sees this.
+ *
+ * AN ACCOUNT THAT IS NOT CONFIGURED IS REFUSED HERE, before a password is read and long before
+ * anything is dialled, and the refusal lists the ones that exist. Two reasons. A model that
+ * invented an address should be corrected rather than handed a login failure from a mail server,
+ * which is a sentence about credentials for a mailbox that does not exist; and `send_message` must
+ * not reach the network on a mistaken argument, since the interesting mistake is a Bot that was
+ * talked into naming an account by the mail it just read.
+ *
+ * Matched case-insensitively, because the configured list is lower-cased and an address is.
+ */
+export function selectAccount(
+  args: Record<string, unknown>,
+  users: readonly string[],
+): { account?: string; error?: string } {
+  const asked = stringArg(args, "account");
+  if (asked === undefined) return { account: users[0] };
+
+  const wanted = asked.toLowerCase();
+  if (!users.includes(wanted)) {
+    return {
+      error: `${asked} is not one of this deployment's mailbox accounts. It has ${users.join(", ")}. Nothing was read and nothing was sent.`,
+    };
+  }
+  return { account: wanted };
+}
+
+/**
  * Call one tool.
  *
  * The grant and the policy are already settled by the time anything gets here: `plugins/store.ts`
@@ -613,16 +729,25 @@ export async function callTool(
   const access = installed;
   if (!access) return failure(NOT_CONFIGURED);
 
+  const chosen = selectAccount(args, access.config.users);
+  if (chosen.error || !chosen.account) {
+    return failure(chosen.error ?? NOT_CONFIGURED);
+  }
+  const account = chosen.account;
+
   let password: string | null = null;
   try {
-    password = await access.password();
-    if (!password) return failure(NO_PASSWORD);
+    password = await access.password(account);
+    if (!password) return failure(noPassword(account));
 
     const clients = (access.clients ?? createMailboxClients)(
       access.config,
+      account,
       password,
     );
     const mailbox = stringArg(args, "mailbox") ?? DEFAULT_MAILBOX;
+    // The folder and whose folder, which is how every sentence below names it. See `where`.
+    const place = where(mailbox, account);
 
     if (toolName === "list_messages") {
       const asked = integerArg(args, "limit");
@@ -635,12 +760,12 @@ export async function callTool(
       if (page.headers.length === 0) {
         // Said in words rather than returned as an empty string: an empty result reads to a model
         // as "the tool had nothing to say" and gets filled in from memory.
-        return asResult(`There are no messages in ${mailbox}.`);
+        return asResult(`There are no messages in ${place}.`);
       }
       return asResult(
         [
           ...page.headers.map((header) => `- ${headerLine(header)}`),
-          ...pageNotes(page, capped, LIST_LIMIT.max, `messages in ${mailbox}`),
+          ...pageNotes(page, capped, LIST_LIMIT.max, `messages in ${place}`),
         ].join("\n"),
       );
     }
@@ -656,16 +781,16 @@ export async function callTool(
       // A number no mailbox could hold is a message that is not there, and is answered as one
       // rather than dialled and turned into a sequence-set complaint. See MAX_UID.
       if (uid.value > MAX_UID) {
-        return failure(noSuchMessage(uid.value, mailbox));
+        return failure(noSuchMessage(uid.value, place));
       }
 
       const message = await clients.withSession((session) =>
         session.message(mailbox, uid.value as number),
       );
       if (!message) {
-        return failure(noSuchMessage(uid.value, mailbox));
+        return failure(noSuchMessage(uid.value, place));
       }
-      return asResult(messageInWords(message, mailbox));
+      return asResult(messageInWords(message, place));
     }
 
     if (toolName === "search_messages") {
@@ -680,13 +805,13 @@ export async function callTool(
       );
       if (page.headers.length === 0) {
         return asResult(
-          `Nothing in ${mailbox} matches "${query}". There is nothing here to answer from.`,
+          `Nothing in ${place} matches "${query}". There is nothing here to answer from.`,
         );
       }
       return asResult(
         [
           ...page.headers.map((header) => `- ${headerLine(header)}`),
-          ...pageNotes(page, capped, SEARCH_LIMIT.max, "matches"),
+          ...pageNotes(page, capped, SEARCH_LIMIT.max, `matches in ${place}`),
         ].join("\n"),
       );
     }
@@ -724,7 +849,7 @@ export async function callTool(
       // with the same promise that nothing was sent.
       if (inReplyTo.value !== undefined && inReplyTo.value > MAX_UID) {
         return failure(
-          `There is no message with uid ${inReplyTo.value} in ${mailbox}, so there is nothing to reply to. Nothing was sent.`,
+          `There is no message with uid ${inReplyTo.value} in ${place}, so there is nothing to reply to. Nothing was sent.`,
         );
       }
 
@@ -740,7 +865,7 @@ export async function callTool(
          */
         if (!original) {
           return failure(
-            `There is no message with uid ${inReplyTo.value} in ${mailbox}, so there is nothing to reply to. Nothing was sent.`,
+            `There is no message with uid ${inReplyTo.value} in ${place}, so there is nothing to reply to. Nothing was sent.`,
           );
         }
         const threaded = replyFrom(original, subject);
@@ -755,7 +880,7 @@ export async function callTool(
       const sent = await clients.send(outgoing);
       return asResult(
         [
-          `Sent to ${to}, subject "${outgoing.subject}".`,
+          `Sent from ${account} to ${to}, subject "${outgoing.subject}".`,
           outgoing.reply
             ? "It threads as a reply to that message."
             : "It starts a new thread.",
@@ -781,8 +906,6 @@ export async function callTool(
       error instanceof MailboxError || error instanceof Error
         ? error.message
         : String(error);
-    return failure(
-      redacted(message, password, access.config.user).slice(0, 400),
-    );
+    return failure(redacted(message, password, account).slice(0, 400));
   }
 }

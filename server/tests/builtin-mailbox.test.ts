@@ -22,6 +22,7 @@ import {
   redacted,
   refusedRecipients,
   replyFrom,
+  selectAccount,
   useMailbox,
 } from "../src/plugins/builtin-mailbox";
 import { MAX_RESULT_CHARS } from "../src/plugins/mcp";
@@ -48,12 +49,22 @@ const CONNECTION = {
   botId: "bot_helper",
 };
 
+/**
+ * Two accounts on one pair of hosts, which is the shared-hosting shape this connector serves.
+ *
+ * The first is the default, so every case that names no account is also a case about which one that
+ * is. The second exists so "the account was honoured" is a claim that can fail: with one configured
+ * account every answer would name the right address by accident.
+ */
+const ACCOUNTS = ["bot@example.test", "sales@example.test"] as const;
+const DEFAULT_ACCOUNT = ACCOUNTS[0];
+
 const CONFIG: MailboxConfig = {
   imapHost: "imap.example.test",
   imapPort: 993,
   smtpHost: "smtp.example.test",
   smtpPort: 465,
-  user: "bot@example.test",
+  users: [...ACCOUNTS],
   // Unrestricted, which is the default and what every case here but the allowlist ones wants.
   allowedRecipientDomains: new Set<string>(),
 };
@@ -100,7 +111,7 @@ type Stubs = {
     limit: number,
   ) => Promise<MessagePage>;
   send?: (message: OutgoingMessage) => Promise<{ messageId: string | null }>;
-  password?: () => Promise<string | null>;
+  password?: (account: string) => Promise<string | null>;
   /** A deployment configured differently from {@link CONFIG}, for the allowlist cases. */
   config?: MailboxConfig;
 };
@@ -114,16 +125,26 @@ type Stubs = {
  */
 function recordingMailbox(stubs: Stubs = {}): {
   calls: Recorded[];
-  built: { config: MailboxConfig; password: string }[];
+  built: { config: MailboxConfig; account: string; password: string }[];
+  /** Which account each password lookup was for, in order. One vault row per account. */
+  unlocked: string[];
 } {
   const calls: Recorded[] = [];
-  const built: { config: MailboxConfig; password: string }[] = [];
+  const built: {
+    config: MailboxConfig;
+    account: string;
+    password: string;
+  }[] = [];
+  const unlocked: string[] = [];
 
   useMailbox({
     config: stubs.config ?? CONFIG,
-    password: stubs.password ?? (async () => PASSWORD),
-    clients: (config, password): MailboxClients => {
-      built.push({ config, password });
+    password: async (account) => {
+      unlocked.push(account);
+      return stubs.password ? await stubs.password(account) : PASSWORD;
+    },
+    clients: (config, account, password): MailboxClients => {
+      built.push({ config, account, password });
       const session: MailboxSession = {
         async recent(mailbox, limit) {
           calls.push({ method: "recent", mailbox, limit });
@@ -152,7 +173,7 @@ function recordingMailbox(stubs: Stubs = {}): {
     },
   });
 
-  return { calls, built };
+  return { calls, built, unlocked };
 }
 
 // The binding is module-level and the suite is one process, so a mailbox left installed here would
@@ -202,6 +223,46 @@ describe("the tool list", () => {
     expect(send?.description ?? "").toContain("nothing to recall");
   });
 
+  test("offers `account` and names the addresses a deployment actually has", async () => {
+    /*
+     * The choices are the deployment's, not this file's, so they are added at list time. A model
+     * told only that an `account` argument exists has to guess at an address, and a guessed address
+     * is a refusal at best.
+     */
+    recordingMailbox();
+    for (const tool of await listTools()) {
+      const properties = (
+        tool.inputSchema as {
+          properties?: Record<string, { description?: string }>;
+        }
+      ).properties;
+      expect(properties?.account).toBeDefined();
+      expect(properties?.account?.description ?? "").toContain(
+        "bot@example.test, sales@example.test",
+      );
+      expect(tool.description).toContain(
+        "bot@example.test, sales@example.test",
+      );
+      expect(tool.description).toContain("`account`");
+    }
+    // Never required: the deployment with one mailbox should not have to think about this at all.
+    const required = (await listTools()).flatMap(
+      (tool) => (tool.inputSchema as { required?: string[] }).required ?? [],
+    );
+    expect(required).not.toContain("account");
+  });
+
+  test("says an account can be named even with no mailbox configured", async () => {
+    // The list is answered either way, so the wording has to work before there are addresses to
+    // name. See listTools.
+    useMailbox(null);
+    for (const tool of await listTools()) {
+      expect(tool.description).toContain(
+        "one of the deployment's configured addresses",
+      );
+    }
+  });
+
   test("needs no mailbox, no credential and no actor", async () => {
     // The only call site is `refreshTools`, which passes `{url, token}`. A list that emptied itself
     // when a variable was unset would revoke an administrator's grants by accident.
@@ -222,22 +283,189 @@ describe("a deployment with no mailbox", () => {
       const result = await callTool(CONNECTION, tool, { uid: 1 });
       expect(result.isError).toBe(true);
       expect(result.text).toBe(
-        "Mailbox is not configured. Set MAILBOX_IMAP_HOST, MAILBOX_SMTP_HOST, MAILBOX_USER and store the password as the mailbox credential.",
+        "Mailbox is not configured. Set MAILBOX_IMAP_HOST, MAILBOX_SMTP_HOST, MAILBOX_USERS and store each account's password as its mailbox credential.",
       );
     }
   });
 
-  test("a configured mailbox with no password in the vault says so separately", async () => {
+  test("a configured mailbox with no password in the vault says so separately, naming the account", async () => {
     // A different job with a different fix. Telling an administrator to set three variables they can
     // see are already set is how a correct instruction reads as a broken deployment.
     const { calls } = recordingMailbox({ password: async () => null });
     const result = await callTool(CONNECTION, "list_messages", {});
 
     expect(result.isError).toBe(true);
-    expect(result.text).toContain("holds no password for the mailbox");
-    expect(result.text).toContain("mailbox credential");
+    expect(result.text).toContain(
+      `holds no password for the mailbox ${DEFAULT_ACCOUNT}`,
+    );
+    // The key id is the address, so the sentence tells an administrator exactly which row to store.
+    expect(result.text).toContain(`key id \`${DEFAULT_ACCOUNT}\``);
     // Nothing was dialled, so nothing could have been sent to a server unauthenticated.
     expect(calls).toEqual([]);
+  });
+
+  test("a password missing for one account is that account's problem, not the mailbox's", async () => {
+    /*
+     * A deployment that stored `bot@` and forgot `sales@` works for the one it has. The refusal has
+     * to name the account that is missing a password, or an administrator goes to look at the
+     * credential that is already there and finds nothing wrong with it.
+     */
+    const { calls } = recordingMailbox({
+      password: async (account) =>
+        account === DEFAULT_ACCOUNT ? PASSWORD : null,
+    });
+
+    const working = await callTool(CONNECTION, "list_messages", {});
+    expect(working.isError).toBe(false);
+
+    const missing = await callTool(CONNECTION, "list_messages", {
+      account: "sales@example.test",
+    });
+    expect(missing.isError).toBe(true);
+    expect(missing.text).toContain(
+      "holds no password for the mailbox sales@example.test",
+    );
+    // Only the account that had one was ever dialled.
+    expect(calls).toEqual([{ method: "recent", mailbox: "INBOX", limit: 10 }]);
+  });
+});
+
+/**
+ * Several accounts on one pair of hosts, which is what a shared host gives a deployment.
+ *
+ * The three properties worth pinning: the default is the first configured, so a deployment that
+ * only ever had one mailbox behaves exactly as it did; an account that was named is the one dialled,
+ * unlocked and answered about; and an account that is not configured is refused before anything
+ * leaves this process.
+ */
+describe("several accounts", () => {
+  test("works in the first configured account when none was named", async () => {
+    const { built, unlocked } = recordingMailbox();
+    const result = await callTool(CONNECTION, "list_messages", {});
+
+    expect(unlocked).toEqual([DEFAULT_ACCOUNT]);
+    expect(built.map((one) => one.account)).toEqual([DEFAULT_ACCOUNT]);
+    expect(result.text).not.toContain("sales@example.test");
+  });
+
+  test("unlocks and dials the account that was named, and names it back", async () => {
+    const { built, unlocked } = recordingMailbox({
+      recent: async () => ({ headers: [{ ...HEADER }], total: 236 }),
+    });
+    const result = await callTool(CONNECTION, "list_messages", {
+      account: "sales@example.test",
+    });
+
+    // The password is that account's own vault row, so the lookup is per account.
+    expect(unlocked).toEqual(["sales@example.test"]);
+    expect(built.map((one) => one.account)).toEqual(["sales@example.test"]);
+    // A model reading two accounts in one turn cannot tell two INBOXes apart otherwise.
+    expect(result.text).toContain(
+      "[showing 1 of 236 messages in INBOX of sales@example.test, newest first.]",
+    );
+  });
+
+  test("takes the address in whatever case it was written", async () => {
+    // The configured list is lower-cased and so is the credential key, so a model that shouted the
+    // address reaches the same mailbox rather than an account that does not exist.
+    const { built } = recordingMailbox();
+    const result = await callTool(CONNECTION, "read_message", {
+      uid: 42,
+      account: "Sales@Example.TEST",
+    });
+
+    expect(result.isError).toBe(false);
+    expect(built.map((one) => one.account)).toEqual(["sales@example.test"]);
+    expect(result.text).toContain("uid 42 in INBOX of sales@example.test");
+  });
+
+  test("refuses an account this deployment does not have, before anything is dialled", async () => {
+    /*
+     * Before the vault and before the network. A model that invented an address should be corrected
+     * with the list of real ones rather than handed a login failure about a mailbox that does not
+     * exist, and `send_message` must not reach a mail server on a mistaken argument.
+     */
+    const { calls, built, unlocked } = recordingMailbox();
+    const result = await callTool(CONNECTION, "send_message", {
+      to: "dana@example.test",
+      subject: "s",
+      body: "b",
+      account: "billing@example.test",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("billing@example.test is not one of");
+    // The configured addresses, so the next call can be right.
+    expect(result.text).toContain("bot@example.test, sales@example.test");
+    expect(result.text).toContain("nothing was sent");
+    expect(calls).toEqual([]);
+    expect(built).toEqual([]);
+    expect(unlocked).toEqual([]);
+  });
+
+  test("sends from the account it was told to, and says which", async () => {
+    const { calls, built } = recordingMailbox();
+    const result = await callTool(CONNECTION, "send_message", {
+      to: "dana@example.test",
+      subject: "The Friday numbers",
+      body: "Attached.",
+      account: "sales@example.test",
+    });
+
+    expect(result.isError).toBe(false);
+    // From is the client's, never an argument: the account decides who the mail is from.
+    expect(built.map((one) => one.account)).toEqual(["sales@example.test"]);
+    expect(result.text).toContain(
+      "Sent from sales@example.test to dana@example.test",
+    );
+    expect(calls.some((call) => call.method === "send")).toBe(true);
+  });
+
+  test("scrubs the account's own password out of that account's failure", async () => {
+    /*
+     * Redaction is per selected account: the AUTH=PLAIN blob a server quotes back carries the
+     * account and its password together, so scrubbing with the default account's name would leave
+     * another account's credential in the sentence.
+     */
+    const OTHER = "a-different-secret-entirely";
+    recordingMailbox({
+      password: async (account) =>
+        account === "sales@example.test" ? OTHER : PASSWORD,
+      recent: async () => {
+        const blob = Buffer.from(
+          `\u0000sales@example.test\u0000${OTHER}`,
+          "utf8",
+        ).toString("base64");
+        throw new MailboxError(`A1 BAD failed: AUTHENTICATE PLAIN ${blob}`);
+      },
+    });
+    const result = await callTool(CONNECTION, "list_messages", {
+      account: "sales@example.test",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).not.toContain(OTHER);
+    expect(result.text).not.toContain(
+      Buffer.from(`\u0000sales@example.test\u0000${OTHER}`, "utf8").toString(
+        "base64",
+      ),
+    );
+    expect(result.text).toContain("[redacted]");
+    expect(result.text).toContain("BAD failed");
+  });
+
+  test("picks the account out of the arguments, on its own", () => {
+    const users = ["bot@example.test", "sales@example.test"];
+    expect(selectAccount({}, users)).toEqual({ account: "bot@example.test" });
+    expect(selectAccount({ account: "  " }, users)).toEqual({
+      account: "bot@example.test",
+    });
+    expect(selectAccount({ account: "SALES@example.test" }, users)).toEqual({
+      account: "sales@example.test",
+    });
+    expect(
+      selectAccount({ account: "nobody@example.test" }, users).error,
+    ).toContain("not one of this deployment's mailbox accounts");
   });
 });
 
@@ -245,7 +473,9 @@ describe("listing", () => {
   test("dials the configured mailbox with the vault's password", async () => {
     const { built } = recordingMailbox();
     await callTool(CONNECTION, "list_messages", {});
-    expect(built).toEqual([{ config: CONFIG, password: PASSWORD }]);
+    expect(built).toEqual([
+      { config: CONFIG, account: DEFAULT_ACCOUNT, password: PASSWORD },
+    ]);
   });
 
   test("defaults to ten of INBOX", async () => {
@@ -297,7 +527,9 @@ describe("listing", () => {
     });
     const result = await callTool(CONNECTION, "list_messages", {});
 
-    expect(result.text).toContain("showing 10 of 4321 messages in INBOX");
+    expect(result.text).toContain(
+      `showing 10 of 4321 messages in INBOX of ${DEFAULT_ACCOUNT}, newest first.`,
+    );
     // Nothing was capped, so the tool's own limit is not mentioned as well.
     expect(result.text).not.toContain("most this tool lists");
   });
@@ -320,7 +552,9 @@ describe("listing", () => {
     const result = await callTool(CONNECTION, "list_messages", {});
 
     expect(result.isError).toBe(false);
-    expect(result.text).toBe("There are no messages in INBOX.");
+    expect(result.text).toBe(
+      `There are no messages in INBOX of ${DEFAULT_ACCOUNT}.`,
+    );
   });
 
   test("bounds the whole answer the way every other connector's is", async () => {
@@ -489,7 +723,9 @@ describe("searching", () => {
     });
 
     expect(result.isError).toBe(false);
-    expect(result.text).toContain('Nothing in INBOX matches "invoice"');
+    expect(result.text).toContain(
+      `Nothing in INBOX of ${DEFAULT_ACCOUNT} matches "invoice"`,
+    );
     expect(result.text).toContain("nothing here to answer from");
   });
 });
@@ -514,7 +750,9 @@ describe("sending", () => {
         },
       },
     ]);
-    expect(result.text).toContain("Sent to dana@example.test");
+    expect(result.text).toContain(
+      `Sent from ${DEFAULT_ACCOUNT} to dana@example.test`,
+    );
     expect(result.text).toContain("starts a new thread");
   });
 
@@ -834,12 +1072,12 @@ describe("redaction, on its own", () => {
      */
     const login = Buffer.from(PASSWORD, "utf8").toString("base64");
     const plain = Buffer.from(
-      `\u0000${CONFIG.user}\u0000${PASSWORD}`,
+      `\u0000${DEFAULT_ACCOUNT}\u0000${PASSWORD}`,
       "utf8",
     ).toString("base64");
 
     const message = `A1 BAD failed: A1 AUTHENTICATE PLAIN ${plain} / LOGIN ${login}`;
-    const scrubbed = redacted(message, PASSWORD, CONFIG.user);
+    const scrubbed = redacted(message, PASSWORD, DEFAULT_ACCOUNT);
 
     expect(scrubbed).not.toContain(login);
     expect(scrubbed).not.toContain(plain);
