@@ -3,6 +3,7 @@ import type { MailboxConfig } from "../src/config";
 import {
   type FullMessage,
   MAX_BODY_CHARS,
+  MAX_FOLDERS_LISTED,
   MAX_SOURCE_BYTES,
   type MailboxClients,
   MailboxError,
@@ -10,6 +11,7 @@ import {
   type MessageHeader,
   type MessagePage,
   mailServerSentence,
+  noSuchFolderSentence,
   type OutgoingMessage,
   readBody,
   strippedHtml,
@@ -242,8 +244,22 @@ describe("the tool list", () => {
       expect(properties?.mailbox).toBeUndefined();
       const description = properties?.folder?.description ?? "";
       expect(description).toContain("IMAP folder");
+      expect(description).toContain(
+        "Leave it unset unless the person names a folder",
+      );
       expect(description).toContain("This is not an email address");
+      // The local part is the second half of the same mistake, so the argument says so itself.
+      expect(description).toContain("not the part before the @");
       expect(description).toContain("use `account`");
+
+      /*
+       * A model reads a schema in order, and the argument it meets first is the one it reaches for
+       * when it wants to say "the support mailbox". `folder` first is how an address, and then the
+       * local part of one, ends up in it.
+       */
+      const order = Object.keys(properties ?? {});
+      expect(order[0]).toBe("account");
+      expect(order.indexOf("account")).toBeLessThan(order.indexOf("folder"));
     }
   });
 
@@ -537,14 +553,48 @@ describe("several accounts", () => {
     expect(address.text).toContain("Pass the address as `account` instead");
   });
 
+  test("refuses an account's local part in `folder`, before anything is dialled", async () => {
+    /*
+     * The retry after the @ guard fired, as it actually happened: refused `support@example.test`,
+     * the model tried `support`, then `webmaster`, which are the parts before the @ of configured
+     * accounts. The mail server answers "Mailbox doesn't exist: support", which reads as a folder
+     * that happens to be missing rather than as an argument that is wrong.
+     */
+    const { calls, built, unlocked } = recordingMailbox();
+    const result = await callTool(CONNECTION, "list_messages", {
+      folder: "Sales",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toBe(
+      "Sales is the account sales@example.test, not a folder. Pass account=sales@example.test and leave folder unset to read INBOX. Nothing was read and nothing was sent.",
+    );
+    expect(calls).toEqual([]);
+    expect(built).toEqual([]);
+    expect(unlocked).toEqual([]);
+  });
+
   test("picks the folder out of the arguments, on its own", () => {
-    expect(selectFolder({})).toEqual({ folder: "INBOX" });
-    expect(selectFolder({ folder: "  " })).toEqual({ folder: "INBOX" });
-    expect(selectFolder({ folder: "Archive" })).toEqual({ folder: "Archive" });
-    expect(selectFolder({ mailbox: "Sent" })).toEqual({ folder: "Sent" });
-    expect(selectFolder({ folder: "a@b.test" }).error).toContain(
+    const users = ["bot@example.test", "sales@example.test"];
+    expect(selectFolder({}, users)).toEqual({ folder: "INBOX" });
+    expect(selectFolder({ folder: "  " }, users)).toEqual({ folder: "INBOX" });
+    expect(selectFolder({ folder: "Archive" }, users)).toEqual({
+      folder: "Archive",
+    });
+    expect(selectFolder({ mailbox: "Sent" }, users)).toEqual({
+      folder: "Sent",
+    });
+    expect(selectFolder({ folder: "a@b.test" }, users).error).toContain(
       "looks like an email address",
     );
+    // Case-insensitively and after trimming, which is how a model writes it.
+    expect(selectFolder({ folder: " BOT " }, users).error).toContain(
+      "is the account bot@example.test, not a folder",
+    );
+    // A folder that merely starts the same way is still a folder.
+    expect(selectFolder({ folder: "bot-archive" }, users)).toEqual({
+      folder: "bot-archive",
+    });
   });
 
   test("picks the account out of the arguments, on its own", () => {
@@ -1038,6 +1088,74 @@ describe("picking the refused recipients out of a to field", () => {
       "not-an-address",
     ]);
     expect(refusedRecipients("trailing@", allowed)).toEqual(["trailing@"]);
+  });
+});
+
+describe("a folder that is not there", () => {
+  test("answers with the folders that are, and says the account is not chosen this way", () => {
+    /*
+     * "Mailbox doesn't exist: support" reads as a folder that happens to be missing, so a model
+     * retries with another folder name. The folders that do exist, plus one sentence about which
+     * argument picks the account, turn a loop into a correction.
+     */
+    expect(
+      noSuchFolderSentence("support", "bot@example.test", [
+        "INBOX",
+        "Sent",
+        "Archive",
+      ]),
+    ).toBe(
+      "No folder named support in bot@example.test. Folders here: INBOX, Sent, Archive. The account is chosen by `account`, not by folder; leave folder unset for INBOX.",
+    );
+  });
+
+  test("says nothing about folders when the server would not list them", () => {
+    // A LIST that failed leaves the correction without its examples. Still better than the vendor's
+    // own sentence, and never a reason to lose the refusal.
+    const sentence = noSuchFolderSentence("support", "bot@example.test", []);
+    expect(sentence).not.toContain("Folders here");
+    expect(sentence).toContain("The account is chosen by `account`");
+  });
+
+  test("keeps the instruction when there are more folders than fit", () => {
+    /*
+     * Trimmed from the end of the LIST rather than the end of the sentence: the closing instruction
+     * is the half that changes what the model does next, and a failure is capped at 400 characters
+     * by the transport above this.
+     */
+    const many = Array.from(
+      { length: MAX_FOLDERS_LISTED + 20 },
+      (_, index) => `Folder-Number-${index}`,
+    );
+    const sentence = noSuchFolderSentence("support", "bot@example.test", many);
+
+    expect(sentence.length).toBeLessThanOrEqual(400);
+    expect(sentence).toContain("Folders here: Folder-Number-0,");
+    expect(sentence).toContain(", and more.");
+    expect(sentence).toContain(
+      "The account is chosen by `account`, not by folder; leave folder unset for INBOX.",
+    );
+  });
+
+  test("reaches the model whole, rather than cut by the failure cap", async () => {
+    const sentence = noSuchFolderSentence("support", "bot@example.test", [
+      "INBOX",
+      "Sent",
+      "Archive",
+      "Drafts",
+      "Junk",
+    ]);
+    recordingMailbox({
+      recent: async () => {
+        throw new MailboxError(sentence);
+      },
+    });
+    const result = await callTool(CONNECTION, "list_messages", {
+      folder: "Newsletters",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toBe(sentence);
   });
 });
 

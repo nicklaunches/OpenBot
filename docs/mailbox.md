@@ -98,9 +98,19 @@ Every one of them takes two arguments about where to look, and they are differen
   defaults to `INBOX`.
 
 An address in `folder` is refused before anything is dialled, saying to pass it as `account`
-instead. That is not a hypothetical: a smaller model given a `mailbox` argument and an `account`
-argument put the address in the first one, was answered "Character not allowed in mailbox name" by
-the IMAP server, and never tried the second. The argument is named `folder` for the same reason.
+instead, and so is the part before the @ of a configured account. Neither is a hypothetical. A
+smaller model given a `mailbox` argument and an `account` argument put the address in the first one,
+was answered "Character not allowed in mailbox name" by the IMAP server, and never tried the second;
+refused that, it retried with `support` and then `webmaster`, which are the local parts of two
+configured accounts, and was answered "Mailbox doesn't exist: support". The argument is named
+`folder`, says in its own description that it is neither an address nor half of one, and is listed
+after `account` so that is the argument a model meets first.
+
+A folder that genuinely is not there is answered with the folders that are: "No folder named
+Newsletters in support@example.com. Folders here: INBOX, Sent, Archive. The account is chosen by
+`account`, not by folder; leave folder unset for INBOX." The listing costs one `LIST` on the
+connection that was already open, inside the same deadline, and it is what turns the vendor's
+"Mailbox doesn't exist" into something a model can act on rather than retry against.
 
 Every answer names both, so a turn that reads two accounts cannot merge them and a model reading the
 result learns the vocabulary: "showing 10 of 236 messages in folder INBOX of support@example.com,

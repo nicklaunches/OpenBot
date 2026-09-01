@@ -309,6 +309,70 @@ export function mailServerSentence(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** The most folder names one refusal will list. See {@link noSuchFolderSentence}. */
+export const MAX_FOLDERS_LISTED = 40;
+
+/**
+ * Whether the server refused because the folder is not there, rather than for any other reason.
+ *
+ * Only ever asked about a failed SELECT, which narrows it a lot: at that point the connection is up
+ * and authenticated, so the interesting failures are "no such folder" and permission. Every server
+ * words the first differently ("Mailbox doesn't exist: support", "[NONEXISTENT] Unknown Mailbox",
+ * "NO Mailbox does not exist"), so the wordings are matched rather than a code that not every
+ * server sends.
+ */
+function looksLikeMissingFolder(error: unknown): boolean {
+  const sentence = mailServerSentence(error).toLowerCase();
+  return (
+    sentence.includes("doesn't exist") ||
+    sentence.includes("does not exist") ||
+    sentence.includes("nonexistent") ||
+    sentence.includes("unknown mailbox") ||
+    sentence.includes("no such mailbox") ||
+    sentence.includes("no such folder")
+  );
+}
+
+/**
+ * What a model is told when it asked for a folder that is not there.
+ *
+ * THE VENDOR'S OWN SENTENCE IS A TRAP HERE, which is why this is the one place the rule about
+ * keeping it is broken. "Mailbox doesn't exist: support" reads as a folder that happens to be
+ * missing, so a model retries with another folder name, and the live failure this exists for was
+ * exactly that: refused an address in `folder`, it tried `support`, then `webmaster`, which are the
+ * local parts of two configured accounts. The folders that DO exist, and one sentence saying the
+ * account is not chosen this way, turn a loop into a correction.
+ *
+ * Trimmed to fit the 400 characters a failure is capped at by `plugins/builtin-mailbox.ts`, from
+ * the end of the list rather than the end of the sentence: the closing instruction is the half that
+ * changes what the model does next, so it is the half that must survive.
+ */
+export function noSuchFolderSentence(
+  folder: string,
+  account: string,
+  folders: readonly string[],
+): string {
+  const head = `No folder named ${folder} in ${account}.`;
+  const tail =
+    "The account is chosen by `account`, not by folder; leave folder unset for INBOX.";
+
+  const candidates = folders.slice(0, MAX_FOLDERS_LISTED);
+  const room = 380 - head.length - tail.length;
+  const shown: string[] = [];
+  let used = " Folders here: .".length;
+  for (const name of candidates) {
+    if (used + name.length + 2 > room) break;
+    shown.push(name);
+    used += name.length + 2;
+  }
+
+  const middle =
+    shown.length === 0
+      ? ""
+      : ` Folders here: ${shown.join(", ")}${shown.length < folders.length ? ", and more" : ""}.`;
+  return `${head}${middle} ${tail}`;
+}
+
 /**
  * Run one network operation against a wall clock, and shut the socket if the clock wins.
  *
@@ -430,7 +494,30 @@ export function createMailboxClients(
     mailbox: string,
     use: () => Promise<T>,
   ): Promise<T> {
-    const lock = await client.getMailboxLock(mailbox);
+    let lock: Awaited<ReturnType<ImapFlow["getMailboxLock"]>>;
+    try {
+      lock = await client.getMailboxLock(mailbox);
+    } catch (error) {
+      /*
+       * A folder that is not there is answered with the folders that are, on the same connection
+       * and inside the same deadline. See noSuchFolderSentence for why the server's own words are
+       * not enough here.
+       */
+      if (!looksLikeMissingFolder(error)) throw error;
+      let folders: string[] = [];
+      try {
+        folders = (await client.list())
+          .map((box) => box.path)
+          .filter(
+            (path): path is string => typeof path === "string" && path !== "",
+          );
+      } catch {
+        // A LIST that fails leaves the correction without its examples, which is still better than
+        // the vendor's sentence. Never a reason to lose the refusal itself.
+      }
+      throw new MailboxError(noSuchFolderSentence(mailbox, account, folders));
+    }
+
     try {
       return await use();
     } finally {

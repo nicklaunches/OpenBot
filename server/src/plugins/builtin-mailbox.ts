@@ -186,7 +186,7 @@ function noPassword(account: string): string {
  */
 const FOLDER_ARGUMENT = Object.freeze({
   type: "string",
-  description: `IMAP folder to read, such as ${DEFAULT_FOLDER}, Sent or Archive. Default ${DEFAULT_FOLDER}. This is not an email address; to choose the account, use \`account\`.`,
+  description: `IMAP folder to read, such as ${DEFAULT_FOLDER}, Sent or Archive. Default ${DEFAULT_FOLDER}. Leave it unset unless the person names a folder. This is not an email address, and it is not the part before the @ of one; to choose the account, use \`account\`.`,
 } as const);
 
 const TOOLS: readonly McpTool[] = Object.freeze([
@@ -359,13 +359,18 @@ function withAccount(tool: McpTool, users: readonly string[] | null): McpTool {
     ? `Default ${configured[0]}.`
     : "Default is the first of them.";
 
+  /*
+   * ACCOUNT FIRST, deliberately. A model reads a schema in order, and the argument it meets first is
+   * the one it reaches for when it wants to say "the support mailbox". Meeting `folder` first is how
+   * an address, and then the local part of an address, ends up in it.
+   */
   const properties = {
-    ...((tool.inputSchema.properties as Record<string, unknown> | undefined) ??
-      {}),
     account: {
       type: "string",
       description: `Which mailbox account to use, as its email address. ${oneOf} ${fallback}`,
     },
+    ...((tool.inputSchema.properties as Record<string, unknown> | undefined) ??
+      {}),
   };
 
   return {
@@ -725,20 +730,36 @@ export function selectAccount(
  * folder naming that no model turns into "use the other argument". Said here, the fix is in the
  * refusal.
  *
+ * THE LOCAL PART IS THE SECOND HALF OF THE SAME MISTAKE, and it was made live: refused an address
+ * in `folder`, the model retried with `support`, then `webmaster`, which are the parts before the @
+ * of two configured accounts. That is not an address any more, so the check above lets it through,
+ * and the mail server answers "Mailbox doesn't exist: support", which reads as a folder that is
+ * merely missing rather than as an argument that is wrong. A folder genuinely named after an
+ * account's local part is possible and is given up here on purpose: the mistake is common and the
+ * collision is not.
+ *
  * `mailbox` is still read as a name for the same argument. This connector shipped with that key,
  * and a Bot holding a tool list from before the rename would otherwise pass a folder that is
- * silently ignored and read INBOX while believing it read Archive. The check above covers it either
+ * silently ignored and read INBOX while believing it read Archive. Both checks cover it either
  * way, so the old name cannot reintroduce the trap.
  */
-export function selectFolder(args: Record<string, unknown>): {
-  folder?: string;
-  error?: string;
-} {
+export function selectFolder(
+  args: Record<string, unknown>,
+  users: readonly string[],
+): { folder?: string; error?: string } {
   const asked = stringArg(args, "folder") ?? stringArg(args, "mailbox");
   if (asked === undefined) return { folder: DEFAULT_FOLDER };
   if (asked.includes("@")) {
     return {
       error: `${asked} looks like an email address, and \`folder\` names an IMAP folder such as ${DEFAULT_FOLDER}. Pass the address as \`account\` instead. Nothing was read and nothing was sent.`,
+    };
+  }
+
+  const wanted = asked.toLowerCase();
+  const named = users.find((user) => user.split("@")[0] === wanted);
+  if (named) {
+    return {
+      error: `${asked} is the account ${named}, not a folder. Pass account=${named} and leave folder unset to read ${DEFAULT_FOLDER}. Nothing was read and nothing was sent.`,
     };
   }
   return { folder: asked };
@@ -771,7 +792,7 @@ export async function callTool(
   }
   const account = chosen.account;
 
-  const asked = selectFolder(args);
+  const asked = selectFolder(args, access.config.users);
   if (asked.error || !asked.folder) {
     return failure(asked.error ?? NOT_CONFIGURED);
   }
