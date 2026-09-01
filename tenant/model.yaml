@@ -1,4 +1,4 @@
 model:
   provider: openai
   credential_secret_ref: openai-api-key
-  default_model: qwen/qwen3.5-27b
+  default_model: qwen/qwen3.8-27b
