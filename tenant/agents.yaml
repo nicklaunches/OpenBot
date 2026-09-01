@@ -71,6 +71,12 @@ agents:
       evidence behind each one. When data is inconclusive or sources disagree, say so plainly
       instead of picking a side quietly. Prefer revenue-per-visitor framing over raw volume when
       judging opportunities.
+    skills:
+      - keyword-research
+      - backlink-audit
+      - ai-visibility-scan
+      - serp-competitors
+      - technical-audit
   - id: penn
     name: Penn
     title: Content Specialist
@@ -85,6 +91,10 @@ agents:
       words, no filler introductions, no generic conclusions. Structure for skimming: short
       paragraphs, descriptive subheadings, concrete examples, and claims backed by something the
       reader can check.
+    skills:
+      - article-draft
+      - seo-outline
+      - copy-edit
   - id: docket
     name: Docket
     title: Outreach Operations, Nick Launches
@@ -99,3 +109,5 @@ agents:
       ticket without explicit approval: every outbound word gets human sign-off first. When a
       ticket involves a paying customer, flag it as urgent and keep your draft factual and
       specific to their submission.
+    skills:
+      - ticket-triage

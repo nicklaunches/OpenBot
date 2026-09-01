@@ -78,3 +78,176 @@ skills:
     tools:
       - google-drive/search_files
       - google-drive/read_file_content
+
+  # Ranker: each skill narrows the 55 DataForSEO grants to the ~dozen a task actually needs.
+  - slug: keyword-research
+    title: Keyword research
+    summary: Find, size, and qualify keywords for a topic or site, with difficulty and intent.
+    instructions: >-
+      Research keywords for the topic or site given. Start from seed terms, expand with ideas,
+      suggestions, and related keywords, then qualify what you found: search volume, difficulty in
+      bulk rather than one at a time, and search intent. Prefer revenue-per-visitor logic over raw
+      volume when ranking opportunities. Deliver a ranked table with volume, difficulty, intent,
+      and why each keyword made the cut. Name the data source and date on every number.
+    tools:
+      - dataforseo/dataforseo_labs_google_keyword_ideas
+      - dataforseo/dataforseo_labs_google_keyword_suggestions
+      - dataforseo/dataforseo_labs_google_related_keywords
+      - dataforseo/dataforseo_labs_google_keyword_overview
+      - dataforseo/dataforseo_labs_bulk_keyword_difficulty
+      - dataforseo/dataforseo_labs_search_intent
+      - dataforseo/dataforseo_labs_google_top_searches
+      - dataforseo/kw_data_google_ads_search_volume
+      - dataforseo/kw_data_google_trends_explore
+      - dataforseo/kw_data_dfs_trends_explore
+      - dataforseo/ai_optimization_keyword_data_search_volume
+
+  - slug: backlink-audit
+    title: Backlink audit
+    summary: Profile a domain's backlinks, spot gains and losses, and compare against competitors.
+    instructions: >-
+      Audit the backlink profile of the domain given. Start with the summary, then look at referring
+      domains, anchors, and the timeseries to see what was gained and lost and when. Check spam
+      score in bulk before praising any link. For competitive questions, use domain and page
+      intersection to find links competitors hold that the subject does not. A drop in rank with no
+      lost links usually means devaluation, not link loss; check the history series before
+      concluding. Report what changed, when, and what to do about it.
+    tools:
+      - dataforseo/backlinks_summary
+      - dataforseo/backlinks_backlinks
+      - dataforseo/backlinks_anchors
+      - dataforseo/backlinks_referring_domains
+      - dataforseo/backlinks_competitors
+      - dataforseo/backlinks_domain_intersection
+      - dataforseo/backlinks_page_intersection
+      - dataforseo/backlinks_timeseries_summary
+      - dataforseo/backlinks_timeseries_new_lost_summary
+      - dataforseo/backlinks_bulk_ranks
+      - dataforseo/backlinks_bulk_spam_score
+      - dataforseo/backlinks_available_filters
+
+  - slug: ai-visibility-scan
+    title: AI visibility scan
+    summary: Measure how often ChatGPT and other LLMs mention a site, and against whom.
+    instructions: >-
+      Measure the subject's visibility in AI answers. Search LLM mentions for the brand or domain,
+      pull aggregated metrics, and compare across models where the cross-aggregation supports it.
+      Identify the top domains and pages that AI answers cite for the topic, because those are the
+      competitors for generative visibility, which are not always the SERP competitors. Where a
+      live answer matters, query the model directly or use the ChatGPT scraper with an appropriate
+      location. Report share of voice, who wins the citations, and what content shape those winners
+      share.
+    tools:
+      - dataforseo/ai_optimization_llm_response
+      - dataforseo/ai_optimization_llm_models
+      - dataforseo/ai_opt_llm_ment_search
+      - dataforseo/ai_opt_llm_ment_agg_metrics
+      - dataforseo/ai_opt_llm_ment_cross_agg_metrics
+      - dataforseo/ai_opt_llm_ment_top_domains
+      - dataforseo/ai_opt_llm_ment_top_pages
+      - dataforseo/ai_optimization_llm_mentions_filters
+      - dataforseo/ai_opt_llm_ment_loc_and_lang
+      - dataforseo/ai_optimization_chat_gpt_scraper
+      - dataforseo/ai_optimization_chat_gpt_scraper_locations
+      - dataforseo/ai_opt_kw_data_loc_and_lang
+
+  - slug: serp-competitors
+    title: SERP and competitor analysis
+    summary: Read live SERPs, map who ranks for what, and size the traffic at stake.
+    instructions: >-
+      Analyze the search landscape for the keyword or domain given. Pull the live SERP for the
+      terms that matter, then map the competitive field: who ranks, for which keywords, with which
+      pages, and how their rank has moved over time. Use domain intersection to find keywords
+      competitors rank for that the subject does not, and traffic estimation to size what a
+      position is worth. Distinguish a domain that outranks on authority from one that outranks on
+      content shape, and say which the evidence supports.
+    tools:
+      - dataforseo/serp_organic_live_advanced
+      - dataforseo/serp_locations
+      - dataforseo/dataforseo_labs_google_serp_competitors
+      - dataforseo/dataforseo_labs_google_competitors_domain
+      - dataforseo/dataforseo_labs_google_domain_intersection
+      - dataforseo/dataforseo_labs_google_domain_rank_overview
+      - dataforseo/dataforseo_labs_google_historical_rank_overview
+      - dataforseo/dataforseo_labs_google_ranked_keywords
+      - dataforseo/dataforseo_labs_google_keywords_for_site
+      - dataforseo/dataforseo_labs_google_relevant_pages
+      - dataforseo/dataforseo_labs_bulk_traffic_estimation
+      - dataforseo/dataforseo_labs_available_filters
+
+  - slug: technical-audit
+    title: Technical page audit
+    summary: Audit a page's on-page health, performance, and stack, and what its content covers.
+    instructions: >-
+      Audit the page or site given. Fetch the page for on-page signals, parse its content, and run
+      Lighthouse for performance and accessibility scores. Identify the technology stack when it
+      explains a finding. Use content analysis to see how the topic is covered across the web and
+      whether the page's coverage matches. Report issues in order of ranking impact, each with the
+      evidence and the concrete fix, and skip generic advice the data does not support.
+    tools:
+      - dataforseo/on_page_instant_pages
+      - dataforseo/on_page_content_parsing
+      - dataforseo/on_page_lighthouse
+      - dataforseo/domain_analytics_technologies_domain_technologies
+      - dataforseo/domain_analytics_whois_overview
+      - dataforseo/content_analysis_search
+      - dataforseo/content_analysis_summary
+      - dataforseo/content_analysis_phrase_trends
+
+  # Penn: instruction-only craft skills. No tools, so nothing to narrow; these shape the work.
+  - slug: article-draft
+    title: Draft an article
+    summary: Research, outline, and write a full article matched to search intent.
+    instructions: >-
+      Write the article in three passes and say which pass you are in. First research: what the
+      reader wants, what the top-ranking pieces cover, and what they all miss, because that gap is
+      the angle. Second outline: working title, one-sentence promise, and a heading per section
+      with the point that section proves. Third draft: open with the answer or the tension, never
+      with throat-clearing. Short paragraphs, concrete examples, claims a reader can check. Never
+      use em dashes; use commas, colons, or parentheses. No hype words, no filler transitions, no
+      conclusion that restates the introduction. End when the piece is done.
+    tools: []
+
+  - slug: seo-outline
+    title: SEO outline
+    summary: Build an article outline from search intent, entities, and the questions people ask.
+    instructions: >-
+      Build an outline for the target keyword. State the dominant intent first and let it decide
+      the format: guide, comparison, list, or answer page. Structure H2s to cover the subtopics the
+      intent demands, and put the questions people actually ask under them as H3s where they earn
+      a place. Include the entities and terms the topic requires so coverage reads complete.
+      Finish with a meta title under 60 characters and a description under 155 that states the
+      page's promise plainly, without clickbait.
+    tools: []
+
+  - slug: copy-edit
+    title: Copy edit
+    summary: Edit a draft for clarity, evidence, and rhythm without changing its meaning.
+    instructions: >-
+      Edit the draft given, and return the edited text plus a short list of what you changed and
+      why. Cut filler openers, hedges, and any sentence that repeats the one before it. Convert
+      passive constructions to active where the actor matters. Flag every claim that lacks
+      something a reader can check. Vary sentence length so the rhythm does not flatten. Remove AI
+      tells: overused words like delve and dive and crucial, mirrored triads, and summary endings.
+      Never use em dashes. Do not change meaning, voice, or facts; if a fact looks wrong, flag it
+      rather than fix it.
+    tools: []
+
+  # Docket: one skill that narrows its GitHub grants to the triage set.
+  - slug: ticket-triage
+    title: Ticket triage
+    summary: Review open tickets on the outreach repo, verify claims, and draft responses for approval.
+    instructions: >-
+      Triage the tickets in the repository you are pointed at. List what is open, then for each
+      ticket read the full thread, check the claim against the repository's files or commit
+      history where they can settle it, and classify it as an order, bug, question, or complaint.
+      Draft a response for each that needs one, factual and specific to the ticket. Post nothing
+      without explicit approval in this conversation; a comment goes out only after a person says
+      so. Tickets from paying customers are flagged urgent and listed first.
+    tools:
+      - github/issue_read
+      - github/list_issues
+      - github/search_issues
+      - github/get_file_contents
+      - github/list_commits
+      - github/add_issue_comment
