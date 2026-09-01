@@ -119,8 +119,8 @@ export function useMailbox(access: MailboxAccess | null): void {
   installed = access;
 }
 
-/** The mailbox a tool reads when the call did not name one. */
-const DEFAULT_MAILBOX = "INBOX";
+/** The IMAP folder a tool reads when the call did not name one. */
+const DEFAULT_FOLDER = "INBOX";
 
 /** Bounds on how much mail one call may return. See {@link boundedLimit}. */
 const LIST_LIMIT = { fallback: 10, max: 50 } as const;
@@ -174,6 +174,21 @@ function noPassword(account: string): string {
  * than the mailbox of whoever is asking. A Bot that believes it is reading the person's own mail
  * will summarize somebody else's inbox to them without either party ever saying so.
  */
+/**
+ * The `folder` argument, in the one wording all four tools use.
+ *
+ * IT SAYS WHAT IT IS NOT, and that sentence is the whole point of this constant. A smaller model
+ * given two arguments that both read as "which mailbox" puts the email address in the wrong one:
+ * observed live, a Bot passed `support@example.com` as the folder and was answered "Character not
+ * allowed in mailbox name" by the IMAP server, then "Mailbox doesn't exist: support", and never
+ * tried `account` at all. Naming the folder `folder`, saying it is not an address, and pointing at
+ * the argument that is one costs three lines here and saves a run.
+ */
+const FOLDER_ARGUMENT = Object.freeze({
+  type: "string",
+  description: `IMAP folder to read, such as ${DEFAULT_FOLDER}, Sent or Archive. Default ${DEFAULT_FOLDER}. This is not an email address; to choose the account, use \`account\`.`,
+} as const);
+
 const TOOLS: readonly McpTool[] = Object.freeze([
   {
     name: "list_messages",
@@ -186,8 +201,8 @@ const TOOLS: readonly McpTool[] = Object.freeze([
       "talking to. Say whose it is if it is not obvious from the conversation, and never present its",
       "contents as their own mail.",
       "",
-      "`uid` values are per mailbox. A uid from a listing of one mailbox names a different message in",
-      "another, so pass the same `mailbox` to `read_message` that you listed.",
+      "`uid` values are per folder. A uid from a listing of one folder names a different message in",
+      "another, so pass the same `folder` to `read_message` that you listed.",
     ].join("\n"),
     inputSchema: {
       type: "object",
@@ -196,10 +211,7 @@ const TOOLS: readonly McpTool[] = Object.freeze([
           type: "integer",
           description: `How many messages to list. Default ${LIST_LIMIT.fallback}, at most ${LIST_LIMIT.max}.`,
         },
-        mailbox: {
-          type: "string",
-          description: `Which mailbox to list. Default ${DEFAULT_MAILBOX}.`,
-        },
+        folder: FOLDER_ARGUMENT,
       },
     },
   },
@@ -211,7 +223,7 @@ const TOOLS: readonly McpTool[] = Object.freeze([
       "",
       "A long message is cut off and says so. Nothing is marked read, moved or deleted by opening it.",
       "",
-      "Pass the same `mailbox` the uid came from. Uids are per mailbox, so a uid listed in one names a",
+      "Pass the same `folder` the uid came from. Uids are per folder, so a uid listed in one names a",
       "different message in another.",
     ].join("\n"),
     inputSchema: {
@@ -221,10 +233,7 @@ const TOOLS: readonly McpTool[] = Object.freeze([
           type: "integer",
           description: "The message's uid, from a listing or a search.",
         },
-        mailbox: {
-          type: "string",
-          description: `The mailbox the uid came from. Default ${DEFAULT_MAILBOX}.`,
-        },
+        folder: FOLDER_ARGUMENT,
       },
       required: ["uid"],
     },
@@ -251,10 +260,7 @@ const TOOLS: readonly McpTool[] = Object.freeze([
           type: "integer",
           description: `How many matches to return. Default ${SEARCH_LIMIT.fallback}, at most ${SEARCH_LIMIT.max}.`,
         },
-        mailbox: {
-          type: "string",
-          description: `Which mailbox to search. Default ${DEFAULT_MAILBOX}.`,
-        },
+        folder: FOLDER_ARGUMENT,
       },
       required: ["query"],
     },
@@ -297,10 +303,7 @@ const TOOLS: readonly McpTool[] = Object.freeze([
           description:
             "The uid of the message this answers, so the reply threads. Omit for a new conversation.",
         },
-        mailbox: {
-          type: "string",
-          description: `The mailbox the in_reply_to uid came from. Default ${DEFAULT_MAILBOX}.`,
-        },
+        folder: FOLDER_ARGUMENT,
       },
       required: ["to", "subject", "body"],
     },
@@ -349,19 +352,19 @@ export async function listTools(): Promise<McpTool[]> {
  */
 function withAccount(tool: McpTool, users: readonly string[] | null): McpTool {
   const configured = users && users.length > 0 ? users : null;
-  const choices = configured
-    ? `one of ${configured.join(", ")}`
-    : "one of the deployment's configured addresses";
+  const oneOf = configured
+    ? `One of: ${configured.join(", ")}.`
+    : "One of the deployment's configured addresses.";
   const fallback = configured
     ? `Default ${configured[0]}.`
-    : "Leave it out for the default one.";
+    : "Default is the first of them.";
 
   const properties = {
     ...((tool.inputSchema.properties as Record<string, unknown> | undefined) ??
       {}),
     account: {
       type: "string",
-      description: `Which mailbox account to work in: ${choices}. ${fallback}`,
+      description: `Which mailbox account to use, as its email address. ${oneOf} ${fallback}`,
     },
   };
 
@@ -370,7 +373,7 @@ function withAccount(tool: McpTool, users: readonly string[] | null): McpTool {
     description: [
       tool.description,
       "",
-      `The mailbox has more than one account on some deployments. \`account\` says which to work in, ${choices}, and ${configured ? `leaving it out works in ${configured[0]}` : "leaving it out works in the default one"}. A uid, like a mailbox name, belongs to one account: do not carry one across.`,
+      `\`account\` is the email address of the mailbox to work in. ${oneOf} ${fallback} It is a different argument from \`folder\`, which names an IMAP folder such as ${DEFAULT_FOLDER}: an address belongs in \`account\` and never in \`folder\`. A uid, like a folder, belongs to one account, so do not carry one across.`,
     ].join("\n"),
     inputSchema: { ...tool.inputSchema, properties },
   };
@@ -460,9 +463,13 @@ export function boundedLimit(
  * only in the ambiguous ones, because a model reading "showing 10 of 236 messages in INBOX" across
  * two accounts in one turn has no way to tell which INBOX either page came from, and will merge
  * them.
+ *
+ * The word "folder" is in it for the model rather than for the reader: every answer this connector
+ * gives then models the vocabulary the arguments use, so the thing before "of" reads as a folder
+ * and the thing after it reads as an account, in the same sentence.
  */
-function where(mailbox: string, account: string): string {
-  return `${mailbox} of ${account}`;
+function where(folder: string, account: string): string {
+  return `folder ${folder} of ${account}`;
 }
 
 /**
@@ -473,7 +480,7 @@ function where(mailbox: string, account: string): string {
  * hold. A model told two different things about one situation will try two different fixes.
  */
 function noSuchMessage(uid: number, place: string): string {
-  return `There is no message with uid ${uid} in ${place}. Uids are per mailbox, so check the listing this one came from.`;
+  return `There is no message with uid ${uid} in ${place}. Uids are per folder, so check the listing this one came from.`;
 }
 
 /**
@@ -709,6 +716,35 @@ export function selectAccount(
 }
 
 /**
+ * Which IMAP folder this call reads, and the one mistake worth catching by hand.
+ *
+ * AN ADDRESS IN `folder` IS REFUSED HERE, before the vault and before the network. It is the
+ * mistake a smaller model actually makes: two arguments that both read as "which mailbox", and the
+ * address goes in the wrong one. Left to the mail server it comes back as "Character not allowed in
+ * mailbox name: '.'" and then "Mailbox doesn't exist: support", which are sentences about IMAP
+ * folder naming that no model turns into "use the other argument". Said here, the fix is in the
+ * refusal.
+ *
+ * `mailbox` is still read as a name for the same argument. This connector shipped with that key,
+ * and a Bot holding a tool list from before the rename would otherwise pass a folder that is
+ * silently ignored and read INBOX while believing it read Archive. The check above covers it either
+ * way, so the old name cannot reintroduce the trap.
+ */
+export function selectFolder(args: Record<string, unknown>): {
+  folder?: string;
+  error?: string;
+} {
+  const asked = stringArg(args, "folder") ?? stringArg(args, "mailbox");
+  if (asked === undefined) return { folder: DEFAULT_FOLDER };
+  if (asked.includes("@")) {
+    return {
+      error: `${asked} looks like an email address, and \`folder\` names an IMAP folder such as ${DEFAULT_FOLDER}. Pass the address as \`account\` instead. Nothing was read and nothing was sent.`,
+    };
+  }
+  return { folder: asked };
+}
+
+/**
  * Call one tool.
  *
  * The grant and the policy are already settled by the time anything gets here: `plugins/store.ts`
@@ -735,6 +771,12 @@ export async function callTool(
   }
   const account = chosen.account;
 
+  const asked = selectFolder(args);
+  if (asked.error || !asked.folder) {
+    return failure(asked.error ?? NOT_CONFIGURED);
+  }
+  const folder = asked.folder;
+
   let password: string | null = null;
   try {
     password = await access.password(account);
@@ -745,9 +787,8 @@ export async function callTool(
       account,
       password,
     );
-    const mailbox = stringArg(args, "mailbox") ?? DEFAULT_MAILBOX;
     // The folder and whose folder, which is how every sentence below names it. See `where`.
-    const place = where(mailbox, account);
+    const place = where(folder, account);
 
     if (toolName === "list_messages") {
       const asked = integerArg(args, "limit");
@@ -755,7 +796,7 @@ export async function callTool(
       const { limit, capped } = boundedLimit(asked.value, LIST_LIMIT);
 
       const page = await clients.withSession((session) =>
-        session.recent(mailbox, limit),
+        session.recent(folder, limit),
       );
       if (page.headers.length === 0) {
         // Said in words rather than returned as an empty string: an empty result reads to a model
@@ -785,7 +826,7 @@ export async function callTool(
       }
 
       const message = await clients.withSession((session) =>
-        session.message(mailbox, uid.value as number),
+        session.message(folder, uid.value as number),
       );
       if (!message) {
         return failure(noSuchMessage(uid.value, place));
@@ -801,7 +842,7 @@ export async function callTool(
       const { limit, capped } = boundedLimit(asked.value, SEARCH_LIMIT);
 
       const page = await clients.withSession((session) =>
-        session.search(mailbox, query, limit),
+        session.search(folder, query, limit),
       );
       if (page.headers.length === 0) {
         return asResult(
@@ -856,7 +897,7 @@ export async function callTool(
       let outgoing: OutgoingMessage = { to, subject, body };
       if (inReplyTo.value !== undefined) {
         const original = await clients.withSession((session) =>
-          session.message(mailbox, inReplyTo.value as number),
+          session.message(folder, inReplyTo.value as number),
         );
         /*
          * Refused rather than sent as a new message. A model that asked for a reply and got an

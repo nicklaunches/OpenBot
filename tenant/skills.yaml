@@ -258,8 +258,9 @@ skills:
     summary: Read and search webmaster@ and support@nicklaunches.com; draft replies for approval before sending.
     instructions: >-
       Use the mailbox tools for the two accounts you hold: webmaster@nicklaunches.com (outreach and
-      collaboration) and support@nicklaunches.com (customer support). Pass the account on every
-      call; list the newest messages, read one by uid, search by subject or sender. Match what you find against the outreach
+      collaboration) and support@nicklaunches.com (customer support). On every call, put the email
+      address in the account argument; the folder argument is an IMAP folder such as INBOX and is
+      never an address. List the newest messages, read one by uid, search by subject or sender. Match what you find against the outreach
       tickets when the two overlap, and say which uid you are relying on. Sending is a separate,
       approved act: draft the reply in the conversation first, with the exact recipient, subject,
       and body, and call send_message only after a person approves that text. Pass in_reply_to so

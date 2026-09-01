@@ -89,15 +89,25 @@ carries an encoding of it rather than the password itself.
 
 ## The four tools
 
-Every one of them also takes `account`, which names one of the configured addresses and defaults to
-the first. An account this deployment does not have is refused before the vault is read and before
-anything is dialled, and the refusal lists the ones that exist. Every answer names the account it is
-about, so a turn that reads two of them cannot merge them: "showing 10 of 236 messages in INBOX of
-support@example.com, newest first."
+Every one of them takes two arguments about where to look, and they are different things:
+
+- **`account`** is an email address, one of the configured ones, and it says which mailbox to open.
+  It defaults to the first configured. An account this deployment does not have is refused before
+  the vault is read and before anything is dialled, and the refusal lists the ones that exist.
+- **`folder`** is an IMAP folder inside that account, such as `INBOX`, `Sent` or `Archive`, and it
+  defaults to `INBOX`.
+
+An address in `folder` is refused before anything is dialled, saying to pass it as `account`
+instead. That is not a hypothetical: a smaller model given a `mailbox` argument and an `account`
+argument put the address in the first one, was answered "Character not allowed in mailbox name" by
+the IMAP server, and never tried the second. The argument is named `folder` for the same reason.
+
+Every answer names both, so a turn that reads two accounts cannot merge them and a model reading the
+result learns the vocabulary: "showing 10 of 236 messages in folder INBOX of support@example.com,
+newest first."
 
 - **`list_messages`**: the newest messages in a mailbox, newest first: uid, date, sender, subject
-  and whether it has been read. No bodies. `limit` defaults to 10 and is capped at 50; `mailbox`
-  defaults to `INBOX`.
+  and whether it has been read. No bodies. `limit` defaults to 10 and is capped at 50.
 - **`read_message`**: one message by `uid`, with its headers and its text.
 - **`search_messages`**: messages whose subject, sender or text match `query`, newest first.
   `limit` defaults to 20. The match is the mail server's own IMAP `SEARCH`: a plain substring, with
@@ -111,10 +121,11 @@ support@example.com, newest first."
 The sender is always the selected account, and the confirmation says which. There is no `from`
 field, so a Bot cannot send as somebody else.
 
-**Uids are per mailbox, and a mailbox belongs to one account.** A uid from a listing of `Archive`
+**Uids are per folder, and a folder belongs to one account.** A uid from a listing of `Archive`
 names a different message in `INBOX`, and a uid from `support@`'s INBOX names a different message in
-`sales@`'s, so every tool that takes one also takes the `mailbox` and the `account` it came from. A uid that is not there is refused
-by name rather than guessed at, and for `send_message` nothing is sent.
+`sales@`'s, so every tool that takes one also takes the `folder` and the `account` it came from. A
+uid that is not there is refused by name rather than guessed at, and for `send_message` nothing is
+sent.
 
 **Every result is bounded.** At most 512 KB of a message is read off the wire, so one mail with a
 large attachment cannot become a gigabyte in this process; a message body is then cut at 8,000

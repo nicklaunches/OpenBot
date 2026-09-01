@@ -23,6 +23,7 @@ import {
   refusedRecipients,
   replyFrom,
   selectAccount,
+  selectFolder,
   useMailbox,
 } from "../src/plugins/builtin-mailbox";
 import { MAX_RESULT_CHARS } from "../src/plugins/mcp";
@@ -216,11 +217,34 @@ describe("the tool list", () => {
     // A Bot that believes it is reading the asker's own mail will summarize somebody else's inbox
     // to them, and neither party will ever be told.
     expect(list?.description ?? "").toContain("shared mailbox");
-    expect(list?.description ?? "").toContain("per mailbox");
+    expect(list?.description ?? "").toContain("per folder");
 
     const send = tools.find((tool) => tool.name === "send_message");
     expect(send?.description ?? "").toContain("in_reply_to");
     expect(send?.description ?? "").toContain("nothing to recall");
+  });
+
+  test("names the folder argument `folder`, and says it is not an address", async () => {
+    /*
+     * The live failure this rename came from: a smaller model passed the email address as
+     * `mailbox`, was told "Character not allowed in mailbox name: '.'" by the IMAP server, and
+     * never tried `account`. Two arguments that both read as "which mailbox" is the trap, so one of
+     * them is called `folder` and says in its own description what it is not.
+     */
+    recordingMailbox();
+    for (const tool of await listTools()) {
+      const properties = (
+        tool.inputSchema as {
+          properties?: Record<string, { description?: string }>;
+        }
+      ).properties;
+      expect(properties?.folder).toBeDefined();
+      expect(properties?.mailbox).toBeUndefined();
+      const description = properties?.folder?.description ?? "";
+      expect(description).toContain("IMAP folder");
+      expect(description).toContain("This is not an email address");
+      expect(description).toContain("use `account`");
+    }
   });
 
   test("offers `account` and names the addresses a deployment actually has", async () => {
@@ -237,9 +261,12 @@ describe("the tool list", () => {
         }
       ).properties;
       expect(properties?.account).toBeDefined();
-      expect(properties?.account?.description ?? "").toContain(
-        "bot@example.test, sales@example.test",
+      const description = properties?.account?.description ?? "";
+      expect(description).toContain("as its email address");
+      expect(description).toContain(
+        "One of: bot@example.test, sales@example.test.",
       );
+      expect(description).toContain("Default bot@example.test.");
       expect(tool.description).toContain(
         "bot@example.test, sales@example.test",
       );
@@ -258,7 +285,7 @@ describe("the tool list", () => {
     useMailbox(null);
     for (const tool of await listTools()) {
       expect(tool.description).toContain(
-        "one of the deployment's configured addresses",
+        "the deployment's configured addresses",
       );
     }
   });
@@ -361,7 +388,7 @@ describe("several accounts", () => {
     expect(built.map((one) => one.account)).toEqual(["sales@example.test"]);
     // A model reading two accounts in one turn cannot tell two INBOXes apart otherwise.
     expect(result.text).toContain(
-      "[showing 1 of 236 messages in INBOX of sales@example.test, newest first.]",
+      "[showing 1 of 236 messages in folder INBOX of sales@example.test, newest first.]",
     );
   });
 
@@ -376,7 +403,9 @@ describe("several accounts", () => {
 
     expect(result.isError).toBe(false);
     expect(built.map((one) => one.account)).toEqual(["sales@example.test"]);
-    expect(result.text).toContain("uid 42 in INBOX of sales@example.test");
+    expect(result.text).toContain(
+      "uid 42 in folder INBOX of sales@example.test",
+    );
   });
 
   test("refuses an account this deployment does not have, before anything is dialled", async () => {
@@ -454,6 +483,70 @@ describe("several accounts", () => {
     expect(result.text).toContain("BAD failed");
   });
 
+  test("refuses an address in `folder`, before anything is dialled, pointing at `account`", async () => {
+    /*
+     * The mistake as it actually happened: the address in the folder argument. Left to the mail
+     * server it comes back as "Character not allowed in mailbox name" and then "Mailbox doesn't
+     * exist: support", which are sentences about IMAP folder naming that no model turns into "use
+     * the other argument". The refusal has to carry the fix.
+     */
+    const { calls, built, unlocked } = recordingMailbox();
+    const result = await callTool(CONNECTION, "list_messages", {
+      folder: "support@example.test",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toBe(
+      "support@example.test looks like an email address, and `folder` names an IMAP folder such as INBOX. Pass the address as `account` instead. Nothing was read and nothing was sent.",
+    );
+    expect(calls).toEqual([]);
+    expect(built).toEqual([]);
+    expect(unlocked).toEqual([]);
+  });
+
+  test("refuses an address in `folder` on the write tool too, sending nothing", async () => {
+    const { calls } = recordingMailbox();
+    const result = await callTool(CONNECTION, "send_message", {
+      to: "dana@example.test",
+      subject: "s",
+      body: "b",
+      folder: "sales@example.test",
+      in_reply_to: 42,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("Pass the address as `account` instead");
+    expect(result.text).toContain("nothing was sent");
+    expect(calls).toEqual([]);
+  });
+
+  test("still reads the old `mailbox` key, so a stale tool list is not a silent wrong folder", async () => {
+    // A Bot holding a tool list from before the rename would otherwise pass a folder that is
+    // ignored, and read INBOX while believing it read Archive.
+    const { calls } = recordingMailbox();
+    await callTool(CONNECTION, "list_messages", { mailbox: "Archive" });
+    expect(calls).toEqual([
+      { method: "recent", mailbox: "Archive", limit: 10 },
+    ]);
+
+    // And the guard covers it under the old name as well, so it cannot bring the trap back.
+    const address = await callTool(CONNECTION, "list_messages", {
+      mailbox: "support@example.test",
+    });
+    expect(address.isError).toBe(true);
+    expect(address.text).toContain("Pass the address as `account` instead");
+  });
+
+  test("picks the folder out of the arguments, on its own", () => {
+    expect(selectFolder({})).toEqual({ folder: "INBOX" });
+    expect(selectFolder({ folder: "  " })).toEqual({ folder: "INBOX" });
+    expect(selectFolder({ folder: "Archive" })).toEqual({ folder: "Archive" });
+    expect(selectFolder({ mailbox: "Sent" })).toEqual({ folder: "Sent" });
+    expect(selectFolder({ folder: "a@b.test" }).error).toContain(
+      "looks like an email address",
+    );
+  });
+
   test("picks the account out of the arguments, on its own", () => {
     const users = ["bot@example.test", "sales@example.test"];
     expect(selectAccount({}, users)).toEqual({ account: "bot@example.test" });
@@ -493,7 +586,7 @@ describe("listing", () => {
   test("honours a mailbox and a limit that were asked for", async () => {
     const { calls } = recordingMailbox();
     await callTool(CONNECTION, "list_messages", {
-      mailbox: "Archive",
+      folder: "Archive",
       limit: 3,
     });
     expect(calls).toEqual([{ method: "recent", mailbox: "Archive", limit: 3 }]);
@@ -528,7 +621,7 @@ describe("listing", () => {
     const result = await callTool(CONNECTION, "list_messages", {});
 
     expect(result.text).toContain(
-      `showing 10 of 4321 messages in INBOX of ${DEFAULT_ACCOUNT}, newest first.`,
+      `showing 10 of 4321 messages in folder INBOX of ${DEFAULT_ACCOUNT}, newest first.`,
     );
     // Nothing was capped, so the tool's own limit is not mentioned as well.
     expect(result.text).not.toContain("most this tool lists");
@@ -553,7 +646,7 @@ describe("listing", () => {
 
     expect(result.isError).toBe(false);
     expect(result.text).toBe(
-      `There are no messages in INBOX of ${DEFAULT_ACCOUNT}.`,
+      `There are no messages in folder INBOX of ${DEFAULT_ACCOUNT}.`,
     );
   });
 
@@ -579,7 +672,7 @@ describe("reading one message", () => {
     const { calls } = recordingMailbox();
     const result = await callTool(CONNECTION, "read_message", {
       uid: 42,
-      mailbox: "Archive",
+      folder: "Archive",
     });
 
     expect(result.isError).toBe(false);
@@ -613,8 +706,8 @@ describe("reading one message", () => {
     const result = await callTool(CONNECTION, "read_message", { uid: 7 });
 
     expect(result.isError).toBe(true);
-    expect(result.text).toContain("no message with uid 7 in INBOX");
-    expect(result.text).toContain("per mailbox");
+    expect(result.text).toContain("no message with uid 7 in folder INBOX");
+    expect(result.text).toContain("per folder");
   });
 
   test("a long body is cut and says how long it was", async () => {
@@ -664,7 +757,9 @@ describe("reading one message", () => {
     });
 
     expect(result.isError).toBe(true);
-    expect(result.text).toContain("no message with uid 4294967296 in INBOX");
+    expect(result.text).toContain(
+      "no message with uid 4294967296 in folder INBOX",
+    );
     expect(calls).toEqual([]);
   });
 
@@ -724,7 +819,7 @@ describe("searching", () => {
 
     expect(result.isError).toBe(false);
     expect(result.text).toContain(
-      `Nothing in INBOX of ${DEFAULT_ACCOUNT} matches "invoice"`,
+      `Nothing in folder INBOX of ${DEFAULT_ACCOUNT} matches "invoice"`,
     );
     expect(result.text).toContain("nothing here to answer from");
   });
