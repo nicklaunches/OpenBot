@@ -63,6 +63,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@ag-ui/client": "0.0.57",
+        "@ai-sdk/openai": "^3.0.99",
         "@better-auth/drizzle-adapter": "^1.7.1",
         "@better-auth/sso": "^1.7.1",
         "@copilotkit/runtime": "1.69.0",

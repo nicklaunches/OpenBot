@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { HttpAgent } from "@ag-ui/client";
 import { BuiltInAgent } from "@copilotkit/runtime/v2";
 import { PROVENANCE_GUIDANCE } from "../../shared/bot-prompt";
@@ -27,6 +27,35 @@ const riskRow = {
   title: "Risk & Compliance",
   roleDescription: "Investigate policies and controls.",
 };
+
+/*
+ * A gateway in whoever's `.env` must not decide what these assert.
+ *
+ * Bun loads the repo's `.env` into every test process, and `builtInAgentConfiguration` reads
+ * `OPENAI_BASE_URL` and `BOT_RESPONSES_API` to decide what a Bot is handed. Left alone, the same
+ * assertions pass or fail depending on whose machine ran them.
+ *
+ * Read in the hook rather than once at module scope, because module scope is not the start of the
+ * run: earlier files in the suite set `OPENAI_BASE_URL` to a mock server, and whichever value
+ * happened to be live when this file was evaluated is what a module-scope capture would restore.
+ */
+const GATEWAY_ENVIRONMENT = ["OPENAI_BASE_URL", "BOT_RESPONSES_API"] as const;
+let restoreGatewayEnvironment: (() => void)[] = [];
+
+beforeEach(() => {
+  restoreGatewayEnvironment = GATEWAY_ENVIRONMENT.map((name) => {
+    const original = process.env[name];
+    delete process.env[name];
+    return () => {
+      if (original === undefined) delete process.env[name];
+      else process.env[name] = original;
+    };
+  });
+});
+
+afterEach(() => {
+  for (const restore of restoreGatewayEnvironment) restore();
+});
 
 describe("registered Copilot agents", () => {
   test("normalizes built-in and remote rows", () => {
@@ -105,6 +134,48 @@ describe("registered Copilot agents", () => {
       prompt: `Be helpful.\n\n${PROVENANCE_GUIDANCE}`,
       apiKey: "openai-secret",
     });
+  });
+
+  test("asks a gateway for chat completions, and says so", () => {
+    const assistant = {
+      id: "general-assistant",
+      name: "General Assistant",
+      type: "built_in" as const,
+      systemPrompt: "Be helpful.",
+    };
+    const gateway = {
+      provider: "openai" as const,
+      defaultModel: "qwen/qwen3.5-27b",
+    };
+    const modelFor = () =>
+      builtInAgentConfiguration(assistant, gateway, "gateway-secret").model as {
+        provider: string;
+        modelId: string;
+      };
+
+    process.env.OPENAI_BASE_URL = "https://gateway.internal/v1";
+
+    /*
+     * `openai.chat`, not `openai.responses`, and that is the assertion rather than a detail. The
+     * catalogue string resolves to the SDK's default, which is Responses, so a gateway serving only
+     * chat completions — vLLM, LiteLLM, llama.cpp, Ollama — answered the router and the framework
+     * Bot and 404'd every built-in one. The name goes over as written, because a gateway's
+     * catalogue is its own and its entries are paths.
+     */
+    expect(modelFor().provider).toBe("openai.chat");
+    expect(modelFor().modelId).toBe("qwen/qwen3.5-27b");
+
+    // The escape hatch, under the variable that already decides this for `agent-langgraph` and the
+    // example Bots, so one setting moves a whole deployment onto the other API.
+    process.env.BOT_RESPONSES_API = "true";
+    expect(modelFor().provider).toBe("openai.responses");
+
+    // And nothing changes for the deployment that named no endpoint: OpenAI's own catalogue is
+    // exactly what the string form is for, down to picking Responses for the models needing it.
+    delete process.env.OPENAI_BASE_URL;
+    expect(
+      builtInAgentConfiguration(assistant, gateway, "openai-secret").model,
+    ).toBe("openai/qwen/qwen3.5-27b");
   });
 
   test("fails an unavailable built-in agent through the AG-UI lifecycle", async () => {

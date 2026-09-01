@@ -1,5 +1,6 @@
 import type { BaseEvent, RunAgentInput } from "@ag-ui/client";
 import { AbstractAgent, HttpAgent } from "@ag-ui/client";
+import { createOpenAI } from "@ai-sdk/openai";
 import type { BuiltInAgentConfiguration } from "@copilotkit/runtime/v2";
 import {
   BuiltInAgent,
@@ -184,6 +185,42 @@ function isHttpUrl(value: string) {
   }
 }
 
+/**
+ * The model a built-in Bot answers on, and which of the two OpenAI APIs it is asked through.
+ *
+ * The API shape is the reason this exists. Handed a catalogue string, the runtime resolves it to
+ * the AI SDK's default OpenAI model, which is the Responses one, so every built-in Bot asks for
+ * `/responses` under whatever `OPENAI_BASE_URL` names. Nothing anywhere says so. The rest of the
+ * deployment assumes the other endpoint: `chatCompletionsUrl` builds `/chat/completions` under the
+ * same base URL for routing and tool selection, `agent-bot` writes `/v1/chat/completions` by hand
+ * against it, and `docs/configuration.md` offers the variable to "any endpoint speaking the same
+ * API". Plenty of them speak only that one — vLLM, LiteLLM, llama.cpp, Ollama — and on those a
+ * deployment got a working router, a working framework Bot, and built-in Bots 404ing on an endpoint
+ * the gateway never claimed to serve.
+ *
+ * So the shape is stated here rather than inherited, under `BOT_RESPONSES_API`, which is already
+ * the switch that decides this for `agent-langgraph` and the example Bots. One variable moves the
+ * whole deployment, which is the posture `OPENAI_BASE_URL` itself is documented with, and a
+ * deployment on a Responses-capable gateway says so once.
+ *
+ * `default_model` reaches the endpoint as written either way, because an endpoint names its own
+ * catalogue: gateway names are paths (`qwen/qwen3.5-27b`), and the catalogue string would put a
+ * provider in front of one for the runtime's table to split off again.
+ *
+ * Unset keeps the string. On api.openai.com the catalogue lookup is exactly right, down to picking
+ * the Responses API for the models that require it, and it is what a deployment configuring nothing
+ * already runs.
+ */
+function builtInAgentModel(model: RuntimeModel, apiKey: string) {
+  const baseURL = process.env.OPENAI_BASE_URL?.trim() || undefined;
+  if (!baseURL) return `${model.provider}/${model.defaultModel}`;
+
+  const openai = createOpenAI({ baseURL, apiKey });
+  return process.env.BOT_RESPONSES_API === "true"
+    ? openai(model.defaultModel)
+    : openai.chat(model.defaultModel);
+}
+
 export function builtInAgentConfiguration(
   agent: RegisteredBuiltInAgent,
   model: RuntimeModel,
@@ -227,7 +264,7 @@ export function builtInAgentConfiguration(
   }
 
   return {
-    model: `${model.provider}/${model.defaultModel}`,
+    model: builtInAgentModel(model, apiKey),
     /*
      * The package's role, then what this Bot actually holds, then the computer.
      *

@@ -331,7 +331,16 @@ describe("a built-in Bot", () => {
         }
       )?.messages ?? []
     )
-      .filter((message) => message.role === "system")
+      /*
+       * `developer` as well as `system`, because the role is the SDK's business and not this
+       * assertion's. Asked through chat completions, `@ai-sdk/openai` relabels the system message
+       * for the reasoning families — anything `o*` or `gpt-5` and up, which this fixture's model
+       * name is — and leaves every other name, gateway catalogue entries included, on `system`.
+       * What is being proved here is which tools the guidance names, and that is in the content.
+       */
+      .filter(
+        (message) => message.role === "system" || message.role === "developer",
+      )
       .map((message) => String(message.content))
       .join("\n");
     /*

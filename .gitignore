@@ -21,6 +21,10 @@ app/src/lib/generated/application-config.ts
 **/.impeccable
 .wave-state.md
 
+# Written by the CopilotKit CLI on first run: a project id and an org id belonging to whoever ran it,
+# which is local state and not a fact about this repository.
+.copilotkit/
+
 # TanStack Router scratch output
 app/.tanstack/
 
