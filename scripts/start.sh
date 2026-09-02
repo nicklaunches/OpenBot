@@ -332,7 +332,11 @@ wait_for_openbot "$SERVER_PORT" server
 # The old pattern matched those containers, the guard false-positived, and the worker silently never
 # started. `bun worker/src/index.ts` matches nothing else in the repo. Running from `$ROOT` is safe:
 # relative imports resolve from the importing file, not from the process's cwd.
-if ! pgrep -f "bun worker/src/index.ts" >/dev/null 2>&1; then
+# A replica that shares its database with another instance must not sweep routines as well: a run
+# claimed by a laptop dies when the lid closes, and the other instance's worker already covers it.
+if [ "$(setting OPENBOT_SKIP_WORKER false)" = "true" ]; then
+  info "  worker: skipped (OPENBOT_SKIP_WORKER=true), another instance sweeps this database"
+elif ! pgrep -f "bun worker/src/index.ts" >/dev/null 2>&1; then
   WORKER_DATABASE_URL="$(setting DATABASE_URL postgres://openbot:openbot@localhost:5432/openbot)"
   (cd "$ROOT" && \
     DATABASE_URL="$WORKER_DATABASE_URL" \
