@@ -314,7 +314,9 @@ if ! identifies_as_openbot "$SERVER_PORT" server; then
       bun --env-file=../.env src/index.ts >"$LOGS/server.log" 2>&1 &)
   fi
 fi
-wait_for_openbot "$SERVER_PORT" server
+# A server whose database is across a network takes longer to answer than one on localhost; the
+# default is the local case, and a replica sets OPENBOT_SERVER_WAIT in .env to what its link needs.
+wait_for_openbot "$SERVER_PORT" server "$(setting OPENBOT_SERVER_WAIT 40)"
 
 # The worker: a local stand-in for the routines CronJob, looping the same sweep
 # (`offerDueRoutines`/`dispatchClaimedRoutines`) a cluster would run on a schedule instead. Started
