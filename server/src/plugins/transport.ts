@@ -1,5 +1,6 @@
 import * as builtinMailbox from "./builtin-mailbox";
 import * as builtinRoutines from "./builtin-routines";
+import * as builtinSearchConsole from "./builtin-search-console";
 import type { CatalogueEntry } from "./catalogue";
 import * as driveRest from "./google-drive-rest";
 import type { McpCallResult, McpTool } from "./mcp";
@@ -86,13 +87,15 @@ export type TransportKind =
   | "mcp"
   | "google-drive-rest"
   | "builtin-routines"
-  | "builtin-mailbox";
+  | "builtin-mailbox"
+  | "builtin-search-console";
 
 const TRANSPORTS: Record<TransportKind, VendorTransport> = {
   mcp,
   "google-drive-rest": driveRest,
   "builtin-routines": builtinRoutines,
   "builtin-mailbox": builtinMailbox,
+  "builtin-search-console": builtinSearchConsole,
 };
 
 /**

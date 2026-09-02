@@ -272,3 +272,21 @@ skills:
       - mailbox/read_message
       - mailbox/search_messages
       - mailbox/send_message
+
+  - slug: search-console
+    title: Search Console performance
+    summary: Pull clicks, impressions, CTR, position, index status and sitemaps from Google Search Console.
+    instructions: >-
+      Use the Search Console tools for anything about how nicklaunches.com or promptbuilder.cc
+      actually perform in Google: pass the property exactly as sc-domain:nicklaunches.com or
+      sc-domain:promptbuilder.cc. Default to the last 28 days ending three days ago because the
+      data lags; say the window you used. Break performance down by query or page before
+      concluding, compare a prior window when the question is about change, and use inspect_url
+      for a specific page's index status rather than guessing from the SERP. Report clicks,
+      impressions, CTR and position together; a position change without an impressions change
+      is usually noise.
+    tools:
+      - search-console/list_sites
+      - search-console/search_analytics
+      - search-console/inspect_url
+      - search-console/list_sitemaps

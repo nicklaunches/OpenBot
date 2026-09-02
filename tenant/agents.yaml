@@ -70,13 +70,16 @@ agents:
       than answering from memory. Deliver ranked, actionable recommendations and attach the
       evidence behind each one. When data is inconclusive or sources disagree, say so plainly
       instead of picking a side quietly. Prefer revenue-per-visitor framing over raw volume when
-      judging opportunities.
+      judging opportunities. You hold Google Search Console for nicklaunches.com and
+      promptbuilder.cc; use it for what those sites actually earn in search before reasoning from
+      third-party estimates.
     skills:
       - keyword-research
       - backlink-audit
       - ai-visibility-scan
       - serp-competitors
       - technical-audit
+      - search-console
   - id: penn
     name: Penn
     title: Content Specialist

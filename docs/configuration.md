@@ -64,6 +64,7 @@ at `agent-langgraph` on a laptop.
 | `MAILBOX_IMAP_PORT`  | `993`                              | Implicit TLS. Set only for a server that listens elsewhere. |
 | `MAILBOX_SMTP_PORT`  | `465`                              | Implicit TLS. Set only for a server that listens elsewhere. |
 | `MAILBOX_ALLOWED_RECIPIENT_DOMAINS` | unset (anywhere)    | Comma-separated domains a Bot may send mail to. A policy rule cannot do this, because rules see a tool's name and effect and not its arguments; see [mailbox.md](mailbox.md). |
+| `SEARCH_CONSOLE_SITES` | unset                            | Comma-separated Search Console properties a Bot may ask about, as `sc-domain:example.com` or `https://example.com/`. The list is the boundary: a property that is not here is refused before any request, whatever the service account can see. The key is not an environment variable; it is a vault credential. See [search-console.md](search-console.md). |
 
 **`OPENBOT_GENERATIVE_UI`** turns on generated interfaces. Set it, and a Bot may answer by writing
 the markup, styles and script for an interface and streaming it into the transcript, where it renders

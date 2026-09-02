@@ -99,9 +99,11 @@ describe("which servers this deployment will talk to", () => {
          * `builtin://` scheme, so this branch cannot quietly become a loophole for a future entry
          * that DOES dial a real host: adding one means adding it here, deliberately.
          */
-        expect(["builtin://routines", "builtin://mailbox"]).toContain(
-          entry.host,
-        );
+        expect([
+          "builtin://routines",
+          "builtin://mailbox",
+          "builtin://search-console",
+        ]).toContain(entry.host);
       } else {
         expect(entry.host.startsWith("https://")).toBe(true);
       }
@@ -344,6 +346,61 @@ describe("Mailbox", () => {
       "read_message",
       "search_messages",
     ]) {
+      expect(classifyTool(entry, name, false)).toBe("write");
+    }
+  });
+});
+
+describe("Search Console", () => {
+  const entry = catalogueEntry("search-console");
+
+  test("is in the catalogue and resolves to its own builtin address", () => {
+    expect(entry).not.toBeNull();
+    expect(resolveServerUrl("search-console")?.url).toBe(
+      "builtin://search-console",
+    );
+  });
+
+  test("has no per-person credential, because the service account is the deployment's", () => {
+    /*
+     * The third builtin and the second reached as the deployment. Search Console access is granted to
+     * a service account per property, once, by somebody in Search Console: there is no per-person half
+     * to consent to, so two people asking about the same property are asking about the same property.
+     * Recording that as the asker would put a person's id on a row describing access that was never
+     * theirs.
+     */
+    expect(entry?.auth).toEqual({ kind: "builtin", reachedAs: "deployment" });
+    // `builtin` takes no credential from the server row, so nothing an administrator points at this
+    // entry is ever spent. The service-account key is resolved from the vault by its own key instead.
+    expect(serverCredentialKind(entry as CatalogueEntry)).toBeNull();
+  });
+
+  test("is reached through its own builtin transport, not a vendor and not Mailbox", () => {
+    expect(entry?.transport).toBe("builtin-search-console");
+  });
+
+  test("names no write tools, because every tool here is a read", () => {
+    /*
+     * Empty as a claim rather than an omission. The scope asked for is `webmasters.readonly`, so
+     * Google itself refuses a write, and there is no tool that submits a sitemap, requests indexing or
+     * changes a setting. Adding one means adding it here in the same change.
+     */
+    expect(entry?.writeTools).toEqual([]);
+  });
+
+  test("classifies its tools the same way every other vendor's are classified", () => {
+    for (const name of [
+      "list_sites",
+      "search_analytics",
+      "inspect_url",
+      "list_sitemaps",
+    ]) {
+      expect(classifyTool(entry, name, true)).toBe("read");
+    }
+    // An empty write list does not weaken the fail-closed direction: a name nothing here has vouched
+    // for is still a write, which is what would catch a writing tool added without this list.
+    expect(classifyTool(entry, "submit_sitemap", false)).toBe("write");
+    for (const name of ["list_sites", "search_analytics"]) {
       expect(classifyTool(entry, name, false)).toBe("write");
     }
   });

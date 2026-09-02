@@ -901,3 +901,48 @@ describe("the deployment's mailbox", () => {
     }
   });
 });
+
+/**
+ * The Search Console properties, which are a boundary rather than a convenience.
+ *
+ * The absent case is pinned for the same reason the mailbox's is: it is the ordinary state of every
+ * deployment that does not want this, and it must not be a start-up failure. What is pinned beyond
+ * that is that a value which is not a property string refuses to start, because Search Console has
+ * exactly two spellings and the bare domain everybody reaches for is neither.
+ */
+describe("the deployment's Search Console properties", () => {
+  test("is absent when the variable is unset, without refusing to start", () => {
+    expect(loadConfig(baseEnvironment).searchConsole).toBeUndefined();
+    expect(
+      loadConfig({ ...baseEnvironment, SEARCH_CONSOLE_SITES: "  " })
+        .searchConsole,
+    ).toBeUndefined();
+  });
+
+  test("keeps the properties in the order they were written, spelled as they were", () => {
+    // The spelling is what goes into a request, so nothing is normalised here: `sc-domain:example.com`
+    // and `https://example.com/` are two different properties and neither is derivable from the other.
+    expect(
+      loadConfig({
+        ...baseEnvironment,
+        SEARCH_CONSOLE_SITES:
+          "sc-domain:example.com, https://shop.example.com/",
+      }).searchConsole,
+    ).toEqual({
+      sites: ["sc-domain:example.com", "https://shop.example.com/"],
+    });
+  });
+
+  test("refuses an entry that is not a property string, naming it", () => {
+    /*
+     * `example.com` is the mistake worth catching: it looks like a property, it is not one, and left
+     * alone it becomes a site a model can name, a request Google answers with a permission failure,
+     * and a diagnosis at the wrong end.
+     */
+    for (const entry of ["example.com", "sc-domain:example", "ftp://x.test"]) {
+      expect(() =>
+        loadConfig({ ...baseEnvironment, SEARCH_CONSOLE_SITES: entry }),
+      ).toThrow(`SEARCH_CONSOLE_SITES entry "${entry}"`);
+    }
+  });
+});

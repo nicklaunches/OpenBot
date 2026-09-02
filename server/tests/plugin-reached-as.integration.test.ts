@@ -10,23 +10,27 @@ import {
   mcpServers,
   pluginGrants,
 } from "../src/db/schema";
-import { catalogueEntry } from "../src/plugins/catalogue";
+import { CATALOGUE, catalogueEntry } from "../src/plugins/catalogue";
 import { createPluginStore } from "../src/plugins/store";
 import { TEST_POOL } from "./support/database";
 
 /**
- * Whose access a call ran on, as the audit trail records it, for the two connectors with no vendor.
+ * Whose access a call ran on, as the audit trail records it, for the connectors with no vendor.
  *
  * The catalogue says which each builtin is (`reachedAs` on the entry) and that is asserted where it
  * is written. This file asserts the half that actually matters: that the value reaches the ROW. The
  * question an investigation asks of a per-person connector is "who did this run reach as", and the
- * two builtins answer it differently for a real reason. A routine touches the asking person's own
- * rows, so the row names them. The mailbox is one mailbox belonging to the deployment, opened on a
- * password the deployment holds, so a row naming the asker would attribute access to somebody who
- * never had it.
+ * builtins answer it differently for a real reason. A routine touches the asking person's own rows,
+ * so the row names them. The mailbox is one mailbox belonging to the deployment, opened on a password
+ * the deployment holds, and Search Console reads the deployment's own properties on a service account
+ * the deployment holds, so a row naming the asker would attribute access to somebody who never had it.
  *
- * Nothing is dialled: the vendor is injected, so neither builtin transport runs and no mailbox or
- * routine store is needed. What is under test is the row, not the tool.
+ * Every builtin in the catalogue is enumerated here on purpose. A connector added with no entry in
+ * this list would go unrecorded by this file rather than fail it, which is why the assertion below
+ * that the two lists agree is part of the suite rather than a comment.
+ *
+ * Nothing is dialled: the vendor is injected, so no builtin transport runs and no mailbox, routine
+ * store or service account is needed. What is under test is the row, not the tool.
  */
 
 const database = createDatabase(
@@ -42,6 +46,11 @@ const actorId = `person_${suite}@openbot.local`;
 const CALLS = [
   { serverId: "routines", toolName: "list_routines", reachedAs: actorId },
   { serverId: "mailbox", toolName: "list_messages", reachedAs: "deployment" },
+  {
+    serverId: "search-console",
+    toolName: "list_sites",
+    reachedAs: "deployment",
+  },
 ] as const;
 
 const policy: ActionPolicy = { mode: "enforce", deny: [], allow: ["true"] };
@@ -130,6 +139,17 @@ afterAll(async () => {
 });
 
 describe("whose access a builtin call is recorded as", () => {
+  test("every builtin in the catalogue is covered here", () => {
+    // Without this, adding a connector with no vendor would leave the one property this file exists
+    // for untested, and nothing would fail to say so.
+    const builtins = CATALOGUE.filter(
+      (entry) => entry.auth.kind === "builtin",
+    ).map((entry) => entry.key);
+    expect([...builtins].sort()).toEqual(
+      CALLS.map(({ serverId }) => serverId as string).sort(),
+    );
+  });
+
   for (const { serverId, toolName, reachedAs } of CALLS) {
     test(`${serverId} is reached as ${reachedAs === "deployment" ? "the deployment" : "the asker"}`, async () => {
       const ref = `${serverId}/${toolName}`;
