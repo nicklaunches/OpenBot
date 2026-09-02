@@ -710,10 +710,16 @@ export function ChatTranscript({
                   />
                 </MessageScrollerItem>
               ) : (
+                /*
+                 * No anchor on the person's message, so the scroller follows the bottom for the whole
+                 * turn. Anchoring the question at the top assumes the answer is prose that starts right
+                 * under it; a coworker that opens with nine tool rows puts the answer a screen below,
+                 * out of sight. Following the newest content keeps the reply where the person is looking.
+                 */
                 <MessageScrollerItem
                   key={item.id}
                   messageId={item.id}
-                  scrollAnchor={item.role === "user"}
+                  scrollAnchor={false}
                 >
                   <TranscriptMessage
                     commandNames={commandNames}
