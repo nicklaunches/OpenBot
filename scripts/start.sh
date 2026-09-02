@@ -138,7 +138,10 @@ identifies_as_openbot() {
   case "$name" in
     # A field of this server's own payload. A stray 200 does not carry it.
     server)
-      curl -fsS --max-time 3 "http://localhost:$port/api/copilotkit/info" 2>/dev/null \
+      # Fifteen seconds rather than three: this route checks the licence and reads the database,
+      # and a server whose database is across a network answered it in seven seconds while
+      # perfectly healthy, which a three-second probe reported as a server that never came up.
+      curl -fsS --max-time 15 "http://localhost:$port/api/copilotkit/info" 2>/dev/null \
         | grep -q '"licenseStatus"'
       ;;
     # The app is static HTML with nothing to interrogate, so its title is the identity available.
