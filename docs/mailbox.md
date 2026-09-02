@@ -139,14 +139,38 @@ newest first."
 - **`search_messages`**: messages whose subject, sender or text match `query`, newest first.
   `limit` defaults to 20. The match is the mail server's own IMAP `SEARCH`: a plain substring, with
   no ranking and no boolean syntax.
-- **`send_message`**: sends `to`, `subject` and `body` from the deployment's mailbox. Give
-  `in_reply_to` as the uid of a message and the reply threads: the original is fetched, its
-  `Message-ID` becomes `In-Reply-To`, its own `References` chain plus that id becomes `References`,
-  and `Re: ` goes in front of the subject if it is not already there. Without it, the message opens a
-  new thread however the subject is worded.
+- **`send_message`**: sends `to`, `subject` and `body` from the deployment's mailbox, and files a
+  copy in the account's Sent folder. Give `in_reply_to` as the uid of a message and the reply
+  threads: the original is fetched, its `Message-ID` becomes `In-Reply-To`, its own `References`
+  chain plus that id becomes `References`, and `Re: ` goes in front of the subject if it is not
+  already there. Without it, the message opens a new thread however the subject is worded.
 
 The sender is always the selected account, and the confirmation says which. There is no `from`
 field, so a Bot cannot send as somebody else.
+
+### The copy in Sent
+
+SMTP delivers a message; it does not file one. So a send that did nothing else would leave the
+account's Sent folder empty, webmail showing nothing sent, and a Bot unable to find its own outgoing
+mail. That is not hypothetical: a person checking the mailbox concluded three messages had never
+been sent, and all three had been delivered.
+
+So the message is built once as raw bytes, those bytes are what SMTP delivers, and the same bytes
+are appended to the account's Sent folder, marked `\Seen`. Delivered and stored are then byte for
+byte the same message, down to the `Message-ID`, which is what makes a send verifiable: the
+confirmation names the folder ("A copy is in folder Sent.") and the message id, so a Bot can list
+that folder and find what it just sent.
+
+The folder is resolved by its IMAP special-use flag first, which is the answer that survives a
+localised server, and by the names `Sent`, `Sent Items` and `Sent Messages` on a server that marks
+nothing. An account where neither finds one files no copy rather than guessing, since appending to
+the wrong folder would put outgoing mail where a person reads it as incoming.
+
+**A copy that could not be filed is never reported as a send that failed.** Filing is a separate
+operation against a separate server and happens after delivery, so it can fail on a message that has
+already gone. The confirmation then says the mail was sent, names the reason no copy exists, and
+says not to send it again. A model told only that something failed would send the message a second
+time, and mail cannot be recalled.
 
 **Uids are per folder, and a folder belongs to one account.** A uid from a listing of `Archive`
 names a different message in `INBOX`, and a uid from `support@`'s INBOX names a different message in

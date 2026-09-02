@@ -1009,6 +1009,18 @@ async function runTool(
           outgoing.reply
             ? "It threads as a reply to that message."
             : "It starts a new thread.",
+          /*
+           * WHERE THE COPY WENT, or why there is none, and never as a failure.
+           *
+           * Naming the folder is what lets a Bot check its own work: it can list that folder and
+           * find the message it just sent. The other branch is the one that matters more. Filing is
+           * a separate operation against a separate server and can fail after the mail has gone, so
+           * it says plainly that the mail WAS sent. A model told only that something failed sends
+           * the message again, and mail cannot be recalled.
+           */
+          sent.filedTo
+            ? `A copy is in folder ${sent.filedTo}.`
+            : `The mail was sent, but no copy could be filed in the Sent folder (${redacted(sent.fileError ?? "no reason given", password, account).slice(0, 200)}). It was delivered, so do not send it again.`,
           sent.messageId ? `Message id ${sent.messageId}.` : null,
         ]
           .filter((one): one is string => one !== null)

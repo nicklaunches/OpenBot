@@ -267,6 +267,9 @@ skills:
       approved act: draft the reply in the conversation first, with the exact recipient, subject,
       and body, and call send_message only after a person approves that text. Pass in_reply_to so
       the reply threads under the original. Never send to an address nobody asked you to write to.
+      A send that returned a message id was delivered to the mail server; to confirm it, read the
+      folder Sent of that account rather than the INBOX, and never send the same message twice
+      because you could not find it.
     tools:
       - mailbox/list_messages
       - mailbox/read_message

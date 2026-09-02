@@ -1,6 +1,7 @@
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
-import { createTransport } from "nodemailer";
+import { createTransport, type Transporter } from "nodemailer";
+import MailComposer from "nodemailer/lib/mail-composer";
 import type { MailboxConfig } from "../config";
 
 /**
@@ -158,8 +159,105 @@ export type MessagePage = {
 export type MailboxClients = {
   /** Open a connection, run the work, close it. Closed whatever happened. */
   withSession<T>(use: (session: MailboxSession) => Promise<T>): Promise<T>;
-  send(message: OutgoingMessage): Promise<{ messageId: string | null }>;
+  send(message: OutgoingMessage): Promise<SendReceipt>;
 };
+
+/**
+ * What happened to one outgoing message: it went, and whether a copy was filed.
+ *
+ * TWO OUTCOMES RATHER THAN ONE, and keeping them apart is the whole point of the shape. SMTP
+ * delivery and the IMAP copy are separate operations against separate servers, and the second can
+ * fail after the first has succeeded. Reported as one failure, that is a Bot telling somebody the
+ * mail did not go and sending it again, which is the expensive mistake: mail cannot be recalled and
+ * the recipient gets it twice.
+ */
+export type SendReceipt = {
+  messageId: string | null;
+  /** The folder the copy was appended to, or null when no copy was filed. */
+  filedTo: string | null;
+  /** Why no copy was filed, when none was. Null when one was. */
+  fileError: string | null;
+};
+
+/**
+ * The message as bytes, built once.
+ *
+ * WHY RAW RATHER THAN LETTING NODEMAILER COMPOSE AT SEND TIME. What SMTP delivers and what IMAP
+ * stores have to be the same message, and composing twice is two messages: different `Message-ID`,
+ * different `Date`, different boundaries. A person looking at Sent in webmail would be reading a
+ * near-copy of what the recipient got, and a Bot trying to verify its own send by `Message-ID`
+ * would find nothing.
+ */
+export type ComposedMessage = {
+  raw: Buffer;
+  /** The SMTP envelope, so the delivery uses the same addresses the headers name. */
+  envelope: ReturnType<
+    ReturnType<InstanceType<typeof MailComposer>["compile"]>["getEnvelope"]
+  >;
+  messageId: string;
+};
+
+/**
+ * Build one outgoing message into the bytes that will be both delivered and stored.
+ *
+ * Exported because it is worth asserting on its own: it is the only place the `From` is decided,
+ * and the only place the two threading headers are written.
+ */
+export async function composeMessage(
+  account: string,
+  message: OutgoingMessage,
+): Promise<ComposedMessage> {
+  const composed = new MailComposer({
+    // The selected account, never an address from the arguments. A `from` a model could name is a
+    // Bot sending mail as somebody else.
+    from: account,
+    to: message.to,
+    subject: message.subject,
+    text: message.body,
+    ...(message.reply
+      ? {
+          inReplyTo: message.reply.messageId,
+          references: [...message.reply.references],
+        }
+      : {}),
+  }).compile();
+
+  return {
+    raw: await composed.build(),
+    envelope: composed.getEnvelope(),
+    // `compile` has already ensured one, so this is the id that is in the bytes above rather than a
+    // second one generated here.
+    messageId: composed.messageId(),
+  };
+}
+
+/** The special-use flag every IMAP server that has a Sent folder marks it with (RFC 6154). */
+const SENT_SPECIAL_USE = "\\Sent";
+
+/** What a Sent folder is called on a server that marks nothing. Lower-cased. */
+const SENT_NAMES = new Set(["sent", "sent items", "sent messages"]);
+
+/**
+ * Which folder a copy of a sent message belongs in, out of what the server listed.
+ *
+ * SPECIAL-USE FIRST, because it is the answer that survives a localised server: a French account's
+ * Sent folder is `Éléments envoyés` and no list of English names will ever find it. The names are
+ * the fallback for the servers that mark nothing, and they are the three spellings in the wild.
+ *
+ * Null rather than a guess when neither finds one. Appending to the wrong folder is worse than not
+ * appending: it puts outgoing mail somewhere a person will read it as incoming.
+ */
+export function sentFolderFrom(
+  boxes: readonly { path: string; name?: string; specialUse?: string }[],
+): string | null {
+  const marked = boxes.find((box) => box.specialUse === SENT_SPECIAL_USE);
+  if (marked) return marked.path;
+
+  const named = boxes.find((box) =>
+    SENT_NAMES.has((box.name ?? box.path).toLowerCase()),
+  );
+  return named ? named.path : null;
+}
 
 /** The most of one body that is ever read out of a message. See {@link readBody}. */
 export const MAX_BODY_CHARS = 8_000;
@@ -426,10 +524,52 @@ export async function withDeadline<T>(
  * particular call is working in is another: the same hosts serve every account, and which one this
  * client speaks for is decided per call.
  */
+export type MailboxWire = {
+  /** How an IMAP client is built. Defaults to imapflow. */
+  imap?: (options: ConstructorParameters<typeof ImapFlow>[0]) => ImapLike;
+  /** How an SMTP transport is built. Defaults to nodemailer. */
+  smtp?: (options: SmtpOptions) => SmtpLike;
+};
+
+/** As much of imapflow as this module speaks. */
+export type ImapLike = Pick<
+  ImapFlow,
+  | "connect"
+  | "logout"
+  | "close"
+  | "getMailboxLock"
+  | "mailbox"
+  | "fetch"
+  | "fetchOne"
+  | "search"
+  | "list"
+  | "append"
+>;
+
+/** As much of nodemailer as this module speaks. */
+export type SmtpLike = Pick<Transporter, "sendMail" | "close">;
+
+/** What this module asks an SMTP transport to be built with. */
+export type SmtpOptions = {
+  host: string;
+  port: number;
+  secure: boolean;
+  auth: { user: string; pass: string };
+  connectionTimeout: number;
+  greetingTimeout: number;
+  socketTimeout: number;
+};
+
 export function createMailboxClients(
   config: MailboxConfig,
   account: string,
   password: string,
+  /*
+   * Injected only by tests, and only for the one property that cannot be asserted otherwise: that
+   * the bytes handed to SMTP and the bytes appended to Sent are the same bytes. Everything else
+   * about this module is asserted through `MailboxAccess.clients`, one level up.
+   */
+  wire: MailboxWire = {},
 ): MailboxClients {
   /**
    * Build, use and close a client.
@@ -438,8 +578,12 @@ export function createMailboxClients(
    * connection is most likely and least noticed. `logout` is given the same swallow `mcp.ts` gives
    * `close`: a server that will not say goodbye has not failed the work that just succeeded.
    */
-  async function withClient<T>(use: (client: ImapFlow) => Promise<T>) {
-    const client = new ImapFlow({
+  async function withClient<T>(
+    use: (client: ImapLike) => Promise<T>,
+    what = "reading the mailbox",
+  ) {
+    const build = wire.imap ?? ((options) => new ImapFlow(options));
+    const client = build({
       host: config.imapHost,
       port: config.imapPort,
       // Implicit TLS, always. STARTTLS is negotiated in the clear, so a server that answers without
@@ -469,7 +613,7 @@ export function createMailboxClients(
         // Closed rather than logged out: a deadline has expired because the server is not answering,
         // and LOGOUT is another command to wait for.
         () => client.close(),
-        "reading the mailbox",
+        what,
       );
     } catch (error) {
       // Rewrapped so a caller never has to care whether the failure came from the socket, the
@@ -490,11 +634,11 @@ export function createMailboxClients(
    * `finally` for the same reason the client is closed in one.
    */
   async function withMailbox<T>(
-    client: ImapFlow,
+    client: ImapLike,
     mailbox: string,
     use: () => Promise<T>,
   ): Promise<T> {
-    let lock: Awaited<ReturnType<ImapFlow["getMailboxLock"]>>;
+    let lock: Awaited<ReturnType<ImapLike["getMailboxLock"]>>;
     try {
       lock = await client.getMailboxLock(mailbox);
     } catch (error) {
@@ -643,7 +787,16 @@ export function createMailboxClients(
     },
 
     async send(message) {
-      const transport = createTransport({
+      /*
+       * COMPOSED ONCE, USED TWICE. `raw` goes to SMTP and the same `raw` is appended to Sent, so
+       * what the recipient holds and what the account's Sent folder holds are byte for byte the
+       * same message, down to the Message-ID a Bot would verify its own send by.
+       */
+      const composed = await composeMessage(account, message);
+
+      const build =
+        wire.smtp ?? ((options) => createTransport(options) as SmtpLike);
+      const transport = build({
         host: config.smtpHost,
         port: config.smtpPort,
         // Implicit TLS on 465, for the same reason IMAP uses it: SMTP AUTH sends the password.
@@ -655,31 +808,59 @@ export function createMailboxClients(
       });
 
       try {
-        const sent = await withDeadline(
+        await withDeadline(
           () =>
             transport.sendMail({
-              // The selected account, never an address from the arguments. A `from` a model could
-              // name is a Bot sending mail as somebody else.
-              from: account,
-              to: message.to,
-              subject: message.subject,
-              text: message.body,
-              ...(message.reply
-                ? {
-                    inReplyTo: message.reply.messageId,
-                    references: [...message.reply.references],
-                  }
-                : {}),
+              envelope: composed.envelope,
+              raw: composed.raw,
             }),
           () => transport.close(),
           "sending the message",
         );
-        return { messageId: sent.messageId ?? null };
       } catch (error) {
         throw new MailboxError(mailServerSentence(error));
       } finally {
         transport.close();
       }
+
+      const filed = await fileInSent(composed.raw);
+      return {
+        messageId: composed.messageId,
+        filedTo: filed.folder,
+        fileError: filed.error,
+      };
     },
   };
+
+  /**
+   * Put a copy of a message that has already gone out into the account's Sent folder.
+   *
+   * AFTER THE SEND AND NEVER IN FRONT OF IT. The mail is already delivered by the time this runs,
+   * so nothing it does can stop or duplicate a delivery, and nothing it fails at is a failed send.
+   * That is why every failure here is caught and RETURNED rather than thrown: a throw would reach
+   * the tools as "the send failed", and a Bot told that resends a message that cannot be recalled.
+   *
+   * Why it is needed at all: SMTP delivers, it does not file. Without this the account's Sent
+   * folder stays empty, webmail shows nothing sent, and a person checking concludes the mail was
+   * never sent. That happened, to three messages that had all been delivered.
+   *
+   * On its own connection, inside the same per-operation deadline as everything else here, and
+   * marked `\\Seen` because the account did not receive this message, it wrote it.
+   */
+  async function fileInSent(
+    raw: Buffer,
+  ): Promise<{ folder: string | null; error: string | null }> {
+    try {
+      return await withClient(async (client) => {
+        const folder = sentFolderFrom(await client.list());
+        if (!folder) {
+          return { folder: null, error: "this account has no Sent folder" };
+        }
+        await client.append(folder, raw, ["\\Seen"], new Date());
+        return { folder, error: null };
+      }, "filing the copy in Sent");
+    } catch (error) {
+      return { folder: null, error: mailServerSentence(error) };
+    }
+  }
 }

@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { MailboxConfig } from "../src/config";
 import {
+  composeMessage,
+  createMailboxClients,
   type FullMessage,
+  type ImapLike,
   MAX_BODY_CHARS,
   MAX_FOLDERS_LISTED,
   MAX_SOURCE_BYTES,
@@ -14,6 +17,9 @@ import {
   noSuchFolderSentence,
   type OutgoingMessage,
   readBody,
+  type SendReceipt,
+  type SmtpLike,
+  sentFolderFrom,
   strippedHtml,
   withDeadline,
 } from "../src/mailbox/client";
@@ -114,7 +120,7 @@ type Stubs = {
     query: string,
     limit: number,
   ) => Promise<MessagePage>;
-  send?: (message: OutgoingMessage) => Promise<{ messageId: string | null }>;
+  send?: (message: OutgoingMessage) => Promise<SendReceipt>;
   password?: (account: string) => Promise<string | null>;
   /** A deployment configured differently from {@link CONFIG}, for the allowlist cases. */
   config?: MailboxConfig;
@@ -171,7 +177,11 @@ function recordingMailbox(stubs: Stubs = {}): {
           calls.push({ method: "send", message });
           return stubs.send
             ? await stubs.send(message)
-            : { messageId: "<sent@example.test>" };
+            : {
+                messageId: "<sent@example.test>",
+                filedTo: "Sent",
+                fileError: null,
+              };
         },
       };
     },
@@ -1003,6 +1013,8 @@ describe("sending", () => {
       `Sent from ${DEFAULT_ACCOUNT} to dana@example.test`,
     );
     expect(result.text).toContain("starts a new thread");
+    // Where to verify it. A Bot that cannot find its own sent mail concludes it was never sent.
+    expect(result.text).toContain("A copy is in folder Sent.");
   });
 
   test("refuses a message with no recipient, no subject or no body, sending nothing", async () => {
@@ -1537,5 +1549,271 @@ describe("the wall clock every network operation runs against", () => {
     expect(answer).toBe("done");
     // Nothing to close, and the timer is cleared rather than left holding the process open.
     expect(closed).toBe(0);
+  });
+});
+
+/**
+ * The copy in Sent, which is the half SMTP does not do.
+ *
+ * SMTP delivers; it does not file. Without the append the account's Sent folder stays empty,
+ * webmail shows nothing sent, and a person checking concludes the mail never went. That happened
+ * here, to three messages that had all been delivered, which is why the bytes are built once and
+ * used twice and why a failure to file is never reported as a failure to send.
+ *
+ * These cases reach the real client rather than the stub above, through the one seam that exists
+ * for it: the property worth being sure about is that the bytes handed to SMTP and the bytes
+ * appended to IMAP are the same bytes, and no stub one level up can see both.
+ */
+describe("filing a copy in Sent", () => {
+  type Delivered = { envelope: unknown; raw: unknown };
+  type Appended = { path: string; flags: unknown; raw: unknown; date: unknown };
+
+  /**
+   * The real clients, wired to a recording IMAP and a recording SMTP.
+   *
+   * `folders` is what the server would answer LIST with, and `appendFails` is the server that
+   * refuses the append after the mail has already gone out.
+   */
+  function wired(
+    options: {
+      folders?: { path: string; name?: string; specialUse?: string }[];
+      appendFails?: string;
+    } = {},
+  ) {
+    const delivered: Delivered[] = [];
+    const appended: Appended[] = [];
+    const listed = options.folders ?? [
+      { path: "INBOX", name: "INBOX" },
+      { path: "Sent", name: "Sent" },
+    ];
+
+    const clients = createMailboxClients(CONFIG, DEFAULT_ACCOUNT, PASSWORD, {
+      imap: () =>
+        ({
+          connect: async () => {},
+          logout: async () => {},
+          close: () => {},
+          list: async () => listed,
+          append: async (
+            path: string,
+            raw: unknown,
+            flags: unknown,
+            date: unknown,
+          ) => {
+            if (options.appendFails) throw new Error(options.appendFails);
+            appended.push({ path, raw, flags, date });
+            return { destination: path } as never;
+          },
+        }) as unknown as ImapLike,
+      smtp: () =>
+        ({
+          sendMail: async (mail: { envelope?: unknown; raw?: unknown }) => {
+            delivered.push({ envelope: mail.envelope, raw: mail.raw });
+            return {} as never;
+          },
+          close: () => {},
+        }) as unknown as SmtpLike,
+    });
+
+    return { clients, delivered, appended };
+  }
+
+  const MAIL = {
+    to: "dana@example.test",
+    subject: "The Friday numbers",
+    body: "Attached.",
+  };
+
+  test("delivers and files the very same bytes", async () => {
+    /*
+     * Composed twice would be two messages: different Message-ID, different Date, different
+     * boundaries. A person reading Sent would be looking at a near-copy of what the recipient got,
+     * and a Bot verifying its own send by Message-ID would find nothing.
+     */
+    const { clients, delivered, appended } = wired();
+    const receipt = await clients.send(MAIL);
+
+    expect(delivered).toHaveLength(1);
+    expect(appended).toHaveLength(1);
+    expect(Buffer.isBuffer(delivered[0]?.raw)).toBe(true);
+    expect(appended[0]?.raw).toBe(delivered[0]?.raw);
+
+    const raw = String(delivered[0]?.raw);
+    expect(raw).toContain(`From: ${DEFAULT_ACCOUNT}`);
+    expect(raw).toContain("To: dana@example.test");
+    expect(raw).toContain("Subject: The Friday numbers");
+    expect(raw).toContain("Attached.");
+    // The id in the receipt is the id in the bytes, so it can be looked up in Sent afterwards.
+    expect(receipt.messageId).not.toBeNull();
+    expect(raw).toContain(String(receipt.messageId));
+
+    // The envelope goes with it, so delivery uses the addresses the headers name.
+    expect(delivered[0]?.envelope).toMatchObject({
+      from: DEFAULT_ACCOUNT,
+      to: ["dana@example.test"],
+    });
+
+    expect(appended[0]?.path).toBe("Sent");
+    // Seen, because the account wrote this message rather than receiving it.
+    expect(appended[0]?.flags).toEqual(["\\Seen"]);
+    expect(appended[0]?.date).toBeInstanceOf(Date);
+    expect(receipt.filedTo).toBe("Sent");
+    expect(receipt.fileError).toBeNull();
+  });
+
+  test("finds Sent by its special-use flag, whatever it is called", async () => {
+    // A French account's Sent folder is "Éléments envoyés", and no list of English names finds it.
+    const { clients, appended } = wired({
+      folders: [
+        { path: "INBOX", name: "INBOX" },
+        {
+          path: "Éléments envoyés",
+          name: "Éléments envoyés",
+          specialUse: "\\Sent",
+        },
+      ],
+    });
+    const receipt = await clients.send(MAIL);
+
+    expect(appended[0]?.path).toBe("Éléments envoyés");
+    expect(receipt.filedTo).toBe("Éléments envoyés");
+  });
+
+  test("falls back to the name when the server marks nothing", async () => {
+    const { clients, appended } = wired({
+      folders: [
+        { path: "INBOX", name: "INBOX" },
+        { path: "Sent Items", name: "Sent Items" },
+      ],
+    });
+    const receipt = await clients.send(MAIL);
+
+    expect(appended[0]?.path).toBe("Sent Items");
+    expect(receipt.filedTo).toBe("Sent Items");
+  });
+
+  test("an account with no Sent folder still sends, and says why there is no copy", async () => {
+    const { clients, delivered, appended } = wired({
+      folders: [{ path: "INBOX", name: "INBOX" }],
+    });
+    const receipt = await clients.send(MAIL);
+
+    expect(delivered).toHaveLength(1);
+    expect(appended).toEqual([]);
+    expect(receipt.filedTo).toBeNull();
+    expect(receipt.fileError).toBe("this account has no Sent folder");
+  });
+
+  test("an append that fails is not a send that failed", async () => {
+    /*
+     * The expensive mistake this prevents: reported as a failure, a Bot sends the message again,
+     * and mail cannot be recalled. Delivery already happened by the time the append is attempted.
+     */
+    const { clients, delivered } = wired({
+      appendFails: "Over quota",
+    });
+    const receipt = await clients.send(MAIL);
+
+    expect(delivered).toHaveLength(1);
+    expect(receipt.messageId).not.toBeNull();
+    expect(receipt.filedTo).toBeNull();
+    expect(receipt.fileError).toContain("Over quota");
+  });
+
+  test("picks the folder out of a LIST, on its own", () => {
+    expect(
+      sentFolderFrom([
+        { path: "INBOX", name: "INBOX" },
+        { path: "Archive", name: "Archive" },
+        { path: "S", name: "S", specialUse: "\\Sent" },
+      ]),
+    ).toBe("S");
+    expect(
+      sentFolderFrom([
+        { path: "INBOX", name: "INBOX" },
+        { path: "INBOX.Sent Messages", name: "Sent Messages" },
+      ]),
+    ).toBe("INBOX.Sent Messages");
+    // Null rather than a guess: appending to the wrong folder puts outgoing mail where a person
+    // reads it as incoming.
+    expect(sentFolderFrom([{ path: "INBOX", name: "INBOX" }])).toBeNull();
+  });
+
+  test("writes both threading headers into the bytes, once", async () => {
+    const composed = await composeMessage(DEFAULT_ACCOUNT, {
+      ...MAIL,
+      reply: {
+        messageId: "<first@example.test>",
+        references: ["<older@example.test>", "<first@example.test>"],
+      },
+    });
+    const raw = String(composed.raw);
+
+    expect(raw).toContain("In-Reply-To: <first@example.test>");
+    expect(raw).toContain("<older@example.test>");
+    expect(raw).toContain(`Message-ID: ${composed.messageId}`);
+  });
+});
+
+describe("what a model is told about the copy", () => {
+  test("the confirmation names the folder, so a Bot can verify its own send", async () => {
+    recordingMailbox({
+      send: async () => ({
+        messageId: "<sent@example.test>",
+        filedTo: "Sent Items",
+        fileError: null,
+      }),
+    });
+    const result = await callTool(CONNECTION, "send_message", {
+      to: "dana@example.test",
+      subject: "s",
+      body: "b",
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("A copy is in folder Sent Items.");
+  });
+
+  test("a copy that could not be filed is a note on a successful send, not an error", async () => {
+    // A model told the send failed sends it again. Mail cannot be recalled.
+    recordingMailbox({
+      send: async () => ({
+        messageId: "<sent@example.test>",
+        filedTo: null,
+        fileError: "Over quota",
+      }),
+    });
+    const result = await callTool(CONNECTION, "send_message", {
+      to: "dana@example.test",
+      subject: "s",
+      body: "b",
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("Sent from");
+    expect(result.text).toContain("no copy could be filed in the Sent folder");
+    expect(result.text).toContain("Over quota");
+    expect(result.text).toContain("do not send it again");
+  });
+
+  test("a mail server that quoted the password into the filing failure is scrubbed too", async () => {
+    // The filing failure is a sentence a server wrote, on an authenticated connection, and it
+    // reaches a model and an audit row like any other.
+    recordingMailbox({
+      send: async () => ({
+        messageId: null,
+        filedTo: null,
+        fileError: `NO [AUTHENTICATIONFAILED] LOGIN ${PASSWORD}`,
+      }),
+    });
+    const result = await callTool(CONNECTION, "send_message", {
+      to: "dana@example.test",
+      subject: "s",
+      body: "b",
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.text).not.toContain(PASSWORD);
+    expect(result.text).toContain("[redacted]");
   });
 });
