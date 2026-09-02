@@ -8,6 +8,51 @@ Newest first. `Unreleased` is what is on `main` and not yet tagged.
 
 ## Unreleased
 
+### A Bot can read how the deployment's own sites are doing in Google Search
+
+A new catalogue entry, Search Console, appears at `/admin/plugins/search-console`. It gives a Bot
+four read tools over the deployment's verified properties: `list_sites`, `search_analytics`,
+`inspect_url` and `list_sitemaps`. There is no write tool here at all. The connector asks Google for
+the read-only scope, so nothing it holds can submit a sitemap, request indexing or change a setting,
+and granting the whole connector grants the ability to look. The properties belong to the deployment
+rather than to whoever is asking, so everybody granted the tools reads the same numbers.
+
+Configure the properties with `SEARCH_CONSOLE_SITES`, a comma-separated list written exactly as
+Search Console spells them: `sc-domain:example.com` is the domain property and
+`https://example.com/` is the URL-prefix property, and they are different properties. A bare
+`example.com` is neither, and an entry that is neither refuses to start naming it, rather than
+becoming a site a model can name and Google answers with a permission failure. Leave the variable
+unset and the connector is still listed and still grantable, and every call answers with the
+sentence naming what to set.
+
+That list is the boundary, and it is the reason the connector never asks Google which properties the
+service account can see. Service accounts accumulate properties: somebody adds one to a second site
+to fix something and never removes it, and a connector that trusted the vendor's answer would from
+that moment let every Bot ask about a site nobody decided they could. A `site` outside the list is
+refused before the credential is decrypted, before a token is minted and before any request is made,
+and the refusal names the properties that are configured. The only tolerance is spelling: case is
+folded and a missing trailing slash forgiven, and what goes to Google is always the configured
+spelling.
+
+The service-account key is not an environment variable. It is one row in the encrypted credential
+vault at `/admin/credentials`, kind `mcp`, provider `search-console`, key id `service-account`, with
+the whole JSON key file Google Cloud downloaded as its value. One credential, not one per property,
+because a service account is verified for however many properties somebody added it to. The key is
+read at the moment a call needs it, so a rotation lands on the next tool call rather than the next
+restart. The access token minted from it is held for the hour Google issues it for, keyed by the
+credential's row id, so a rotation invalidates the remembered token by construction. Neither the key
+nor the token reaches a result, a transcript or an audit row. The service account also has to be
+added as a user of each property in Search Console itself, under Settings then Users and
+permissions; `list_sites` is the tool that reports which of the configured properties it can
+actually reach.
+
+Grants are per tool and not per property, so a Bot granted `search_analytics` can ask about every
+configured property: if one must stay out of a Bot's reach, do not configure it here. Every call
+takes the same route as any other connector's. The grant is checked, the policy is evaluated with
+the tool's effect (all four are reads), and an audit row is written, before anything is requested.
+The row records the call as reached as the deployment rather than as the person who asked, because
+the access was the deployment's service account and never anybody's own.
+
 ### A Bot can read and answer the deployment's own mailbox
 
 A new catalogue entry, Mailbox, appears at `/admin/plugins/mailbox`. It gives a Bot four tools

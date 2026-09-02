@@ -41,10 +41,11 @@ export type CatalogueAuth =
    * First-party and in-process. There is no vendor to authenticate to, because the call runs inside
    * this deployment rather than against somebody else's server.
    *
-   * `reachedAs` is not a formality. The two builtins differ on the one question the audit trail
-   * asks: Routines touches the asking person's own rows and is therefore reached AS them, while
-   * Mailbox opens one mailbox that belongs to the deployment, on a password the deployment holds,
-   * and is reached as the deployment however many people ask. Recording the second as the asker
+   * `reachedAs` is not a formality. The builtins differ on the one question the audit trail asks:
+   * Routines touches the asking person's own rows and is therefore reached AS them, while Mailbox
+   * opens one mailbox that belongs to the deployment, on a password the deployment holds, and Search
+   * Console reads the deployment's own properties on a service account the deployment holds. Both of
+   * those are reached as the deployment however many people ask, and recording either as the asker
    * would put a person's id on a row describing access that was never theirs.
    */
   | { kind: "builtin"; reachedAs: "actor" | "deployment" }
@@ -327,6 +328,45 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
      */
     writeTools: Object.freeze(["send_message"]),
     docsUrl: "https://github.com/CopilotKit/OpenBot/blob/main/docs/mailbox.md",
+  },
+  {
+    key: "search-console",
+    title: "Search Console",
+    vendor: "Google",
+    summary:
+      "Search performance, index status and sitemaps for the deployment's verified sites.",
+    /*
+     * Google's product, reached in-process rather than through a vendor server, because there is no
+     * vendor server: Google publishes MCP endpoints for the Workspace products and none for Search
+     * Console, so the choice here is this or nothing. The REST APIs underneath have been generally
+     * available for years.
+     *
+     * The auth is what makes it a builtin rather than a third `user-oauth` entry. Search Console
+     * access is granted to a SERVICE ACCOUNT per property, by somebody in Search Console, once. There
+     * is no per-person half to consent to: two people asking about the same property are asking about
+     * the same property, and the deployment's own key is what answers. That is the Mailbox shape, and
+     * it is recorded the same way.
+     *
+     * The key is NOT reached through `credential_id` on the server row: see
+     * `plugins/builtin-search-console.ts`, which resolves it from the vault as the `search-console`
+     * credential.
+     */
+    host: "builtin://search-console",
+    path: "/",
+    transport: "builtin-search-console",
+    // Reached as the deployment: one service account, verified for the deployment's own properties,
+    // the same answer for everybody who asks. Whoever asked is still on the audit row as the actor;
+    // what this settles is that the access was not theirs.
+    auth: Object.freeze({ kind: "builtin", reachedAs: "deployment" }),
+    /*
+     * Empty, and it is a claim rather than an omission. Every tool here reads: the scope asked for is
+     * `webmasters.readonly`, so Google itself refuses a write, and there is no tool that submits a
+     * sitemap, requests indexing or changes a setting. An unlisted tool still classifies as a write
+     * when the server never advertised it, so the fail-closed direction is unaffected.
+     */
+    writeTools: Object.freeze([]),
+    docsUrl:
+      "https://github.com/CopilotKit/OpenBot/blob/main/docs/search-console.md",
   },
 ]);
 

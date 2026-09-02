@@ -66,6 +66,10 @@ import { createOnboardingStore } from "./people/onboarding";
 import { createPeopleStore } from "./people/store";
 import { mailboxCredentialFor, useMailbox } from "./plugins/builtin-mailbox";
 import { useRoutineTools } from "./plugins/builtin-routines";
+import {
+  searchConsoleCredential,
+  useSearchConsole,
+} from "./plugins/builtin-search-console";
 import { redirectUriFor } from "./plugins/oauth";
 import { createPluginStore } from "./plugins/store";
 import { grantedSkills, grantedTools } from "./plugins/tools";
@@ -379,6 +383,49 @@ useMailbox(
             credentialStore,
             held.id,
           );
+        },
+      }
+    : null,
+);
+
+/**
+ * Search Console, and where its service account comes from.
+ *
+ * Installed the same way and for the same reason as the two above: the transport is a module, so this
+ * is the one seam it has.
+ *
+ * WHAT IS INSTALLED IS A WAY TO READ A KEY, NOT A KEY. Nothing here decrypts anything at boot. The
+ * closure runs when a tool call needs the secret, so an administrator who rotates the service account
+ * is obeyed by the next call rather than by the next restart, and one who revokes it stops the tools
+ * within a call, because `decryptCredentialForUse` refuses a revoked row.
+ *
+ * THE ROW'S ID IS HANDED OVER WITH THE SECRET, which is what makes the access-token cache safe. A
+ * token is good for an hour, so it is remembered rather than minted per call; keyed by this id, a
+ * rotated credential is a different key and the retired one's token is never reached again.
+ *
+ * ONE CREDENTIAL FOR EVERY PROPERTY, unlike the mailbox's one per account. A service account is
+ * verified for however many properties somebody granted it in Search Console, so there is one secret;
+ * which of them a Bot may ask about is `SEARCH_CONSOLE_SITES` rather than the vault.
+ *
+ * Nothing is installed when no properties are configured. The catalogue entry stays admissible and
+ * its tools stay grantable either way (see `DeploymentConfig.searchConsole`), and a call then answers
+ * with the sentence naming what to set.
+ */
+useSearchConsole(
+  config.searchConsole
+    ? {
+        config: config.searchConsole,
+        credential: async () => {
+          const held = await credentialStore.findLiveByKey(
+            searchConsoleCredential(),
+          );
+          if (!held) return null;
+          const serviceAccount = await decryptCredentialForUse(
+            config.keyEncryptionKey,
+            credentialStore,
+            held.id,
+          );
+          return { id: held.id, serviceAccount };
         },
       }
     : null,

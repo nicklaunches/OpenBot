@@ -109,6 +109,37 @@ export type MailboxConfig = {
 };
 
 /**
+ * Which Search Console properties this deployment's Bots may ask about.
+ *
+ * NO SERVICE ACCOUNT HERE, for the reason {@link MailboxConfig} gives about passwords: the key is a
+ * secret and this file is the environment. The service-account JSON lives in the encrypted
+ * credential vault as one credential; see `plugins/builtin-search-console.ts` for how it is resolved
+ * and turned into an access token.
+ *
+ * THE LIST IS THE BOUNDARY, and that is the whole reason this shape exists rather than the connector
+ * asking Google what it can see. A service account added to one property today is usually added to
+ * others later, by somebody who was solving a different problem, and a connector that trusted the
+ * vendor's answer would widen a Bot's reach without anybody deciding to. So the properties are named
+ * here, a site that is not one of them is refused before any request is made, and adding a property
+ * is an administrator's edit rather than a side effect of a permissions change at Google.
+ */
+export type SearchConsoleConfig = {
+  /**
+   * The property strings, exactly as Search Console spells them.
+   *
+   * Two spellings exist and they are different properties: `sc-domain:example.com` is the domain
+   * property covering every scheme and subdomain, and `https://example.com/` is the URL-prefix
+   * property covering only that prefix. They are not interchangeable, and asking about one when the
+   * account is verified for the other is answered by Google as a permission failure, so what is
+   * configured is what is sent.
+   *
+   * Never empty: a configured connector with no property is refused at start-up rather than carried
+   * around as a shape every caller has to check.
+   */
+  sites: readonly string[];
+};
+
+/**
  * Who a deployment lets in, and through which front door.
  *
  * One identity provider is a product decision somebody else already made. A company running this
@@ -315,6 +346,13 @@ export type DeploymentConfig = {
    * connection attempt to nowhere.
    */
   mailbox?: MailboxConfig;
+  /**
+   * The Search Console properties a Bot may ask about. Absent means the tools refuse rather than
+   * fail, exactly as {@link DeploymentConfig.mailbox} does and for the same reason: the catalogue
+   * entry stays admissible and its tools stay grantable, because a Bot's grants are an
+   * administrator's decision and should not evaporate because a variable was unset during a deploy.
+   */
+  searchConsole?: SearchConsoleConfig;
   /** How far one Bot handing work to another may go. */
   handoff: HandoffCaps;
   /**
@@ -1023,6 +1061,39 @@ function allowedRecipientDomains(
 }
 
 /**
+ * The Search Console properties this deployment will answer questions about, if it has any.
+ *
+ * Absent when the variable is unset or blank, which is the ordinary state of a deployment that does
+ * not want this. The connector is still listed and still grantable in that state; what changes is
+ * what a call answers. See {@link DeploymentConfig.searchConsole}.
+ *
+ * AN ENTRY THAT IS NOT A PROPERTY STRING REFUSES TO START, naming it. Search Console has exactly two
+ * spellings, `sc-domain:example.com` and `https://example.com/`, and anything else is a value that
+ * would become a site a model can name, a request Google answers with a permission failure, and a
+ * diagnosis at the wrong end. `example.com` on its own is the mistake worth catching: it looks like a
+ * property, it is not one, and the refusal says which of the two was meant.
+ *
+ * The service-account key is deliberately not read here. See {@link SearchConsoleConfig}.
+ */
+function searchConsoleConfig(
+  environment: Environment,
+): SearchConsoleConfig | undefined {
+  const sites = commaSeparated(environment, "SEARCH_CONSOLE_SITES");
+  if (sites.length === 0) return undefined;
+
+  for (const site of sites) {
+    const domainProperty = /^sc-domain:[^\s/]+\.[^\s/]+$/i.test(site);
+    const urlPrefix = /^https?:\/\/[^\s]+$/i.test(site);
+    if (!domainProperty && !urlPrefix) {
+      throw new Error(
+        `SEARCH_CONSOLE_SITES entry "${site}" must be a Search Console property, either sc-domain:example.com for a domain property or https://example.com/ for a URL-prefix one`,
+      );
+    }
+  }
+  return { sites };
+}
+
+/**
  * How long the audit trail is kept.
  *
  * Refused rather than coerced, like everything else here. "We accepted your retention policy but not
@@ -1065,6 +1136,7 @@ export function loadConfig(
   const managedAgent = managedAgentConfig(environment);
   const workerSharedSecret = optional(environment, "WORKER_SHARED_SECRET");
   const mailbox = mailboxConfig(environment);
+  const searchConsole = searchConsoleConfig(environment);
 
   return {
     databaseUrl: required(environment, "DATABASE_URL"),
@@ -1099,6 +1171,7 @@ export function loadConfig(
       : {}),
     computer: computerConfig(environment),
     ...(mailbox ? { mailbox } : {}),
+    ...(searchConsole ? { searchConsole } : {}),
     handoff: handoffCaps(environment),
     ...(optional(environment, "AGENT_TOOL_TOKEN")
       ? { agentToolToken: optional(environment, "AGENT_TOOL_TOKEN") as string }
