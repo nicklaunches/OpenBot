@@ -101,6 +101,22 @@ describe("sanitizeSeededHistory", () => {
     expect(sanitized.map((message) => message.id)).toEqual(["m1", "m3"]);
   });
 
+  test("a result that lands after a later user message answers nothing", () => {
+    const history = [
+      { id: "u1", role: "user", content: "do it" },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "",
+        toolCalls: [{ id: "late", type: "function", function: { name: "x", arguments: "{}" } }],
+      },
+      { id: "u2", role: "user", content: "also this" },
+      { id: "t1", role: "tool", toolCallId: "late", content: "arrived too late" },
+    ] as unknown as Message[];
+    const out = sanitizeSeededHistory(history);
+    expect(out.map((m) => m.id)).toEqual(["u1", "u2"]);
+  });
+
   test("a result ahead of its own call answers nothing", () => {
     // Position, not mere presence: no provider accepts a result that arrives before the call it
     // belongs to, so a history in that order is still a history to be repaired.

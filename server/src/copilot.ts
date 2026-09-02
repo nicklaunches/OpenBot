@@ -824,6 +824,7 @@ function remoteAgentWithStandingRole(
  * `interruptId` AFTER converting the messages, so a call that a resume is about to answer must
  * survive this pass or the appended result lands on nothing.
  */
+
 class BuiltInAgentWithSaneHistory extends BuiltInAgent {
   /**
    * The configuration, held a second time because the base class keeps its own copy private and

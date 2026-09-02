@@ -78,13 +78,32 @@ export function sanitizeSeededHistory(
   history: Message[],
   answeredElsewhere: ReadonlySet<string> = new Set(),
 ): Message[] {
-  /** For each answered call id, the earliest position that answers it. */
-  const answeredAt = new Map<string, number>();
+  /** Every position that answers a call id, in order. */
+  const answersFor = new Map<string, number[]>();
   for (const [index, message] of history.entries()) {
     const { toolCallId } = message as { toolCallId?: string };
     if (toolCallId === undefined) continue;
-    if (!answeredAt.has(toolCallId)) answeredAt.set(toolCallId, index);
+    answersFor.set(toolCallId, [...(answersFor.get(toolCallId) ?? []), index]);
   }
+  /*
+   * Where a call's answer may still land: before the next thing a person or the system said.
+   *
+   * The model API walks the conversation in order and refuses it the moment a user or system
+   * message arrives while a call is still unanswered. So a result that turns up after a later
+   * user message does not answer anything, however real it was. This happened live: a browser
+   * tool handler resolved late, its result was appended after the person had already typed the
+   * next message, and the call read as answered here while the API still threw on every retry.
+   */
+  const boundaryAfter: number[] = new Array(history.length).fill(history.length);
+  for (let index = history.length - 1, next = history.length; index >= 0; index -= 1) {
+    boundaryAfter[index] = next;
+    const { role } = history[index] as { role?: string };
+    if (role === "user" || role === "system" || role === "developer") next = index;
+  }
+  const answeredWithin = (id: string, index: number): boolean =>
+    (answersFor.get(id) ?? []).some(
+      (at) => at > index && at < (boundaryAfter[index] ?? history.length),
+    );
 
   const surviving = new Set<string>();
   const kept: (Message | undefined)[] = history.map((message, index) => {
@@ -93,8 +112,7 @@ export function sanitizeSeededHistory(
 
     const answered = toolCalls.filter((call) => {
       if (answeredElsewhere.has(call.id)) return true;
-      const at = answeredAt.get(call.id);
-      return at !== undefined && at > index;
+      return answeredWithin(call.id, index);
     });
     for (const call of answered) surviving.add(call.id);
 
