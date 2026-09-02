@@ -42,7 +42,7 @@ way one would for any other irreversible action.
 | `MAILBOX_USERS`      | unset   | Comma-separated addresses on those hosts. The first is the default account. |
 | `MAILBOX_USER`       | unset   | The singular this shipped with, read as a list of one. Both set refuses to start. |
 | `MAILBOX_IMAP_PORT`  | `993`   | Implicit TLS. Set only for a server that listens elsewhere.        |
-| `MAILBOX_SMTP_PORT`  | `465`   | Implicit TLS. Set only for a server that listens elsewhere.        |
+| `MAILBOX_SMTP_PORT`  | `465`   | Implicit TLS on 465; any other port uses STARTTLS and requires it. Use 587 where 465 is blocked outbound. |
 | `MAILBOX_ALLOWED_RECIPIENT_DOMAINS` | unset (anywhere) | Comma-separated domains a Bot may send to. See [Bounding where mail can go](#bounding-where-mail-can-go). |
 
 The three hosts-and-users variables are needed together. Set one or two and the server refuses to

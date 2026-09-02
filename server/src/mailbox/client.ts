@@ -554,6 +554,8 @@ export type SmtpOptions = {
   host: string;
   port: number;
   secure: boolean;
+  /** STARTTLS, required, on any port that is not implicit TLS. */
+  requireTLS: boolean;
   auth: { user: string; pass: string };
   connectionTimeout: number;
   greetingTimeout: number;
@@ -799,8 +801,12 @@ export function createMailboxClients(
       const transport = build({
         host: config.smtpHost,
         port: config.smtpPort,
-        // Implicit TLS on 465, for the same reason IMAP uses it: SMTP AUTH sends the password.
-        secure: true,
+        // Implicit TLS on 465, for the same reason IMAP uses it: SMTP AUTH sends the password. Any
+        // other port is STARTTLS, and required rather than opportunistic, so a server that will not
+        // upgrade gets no password at all. Hosts that block 465 outbound (Hetzner does, until asked)
+        // usually leave 587 open, which is why the port is a setting and the TLS mode follows it.
+        secure: config.smtpPort === 465,
+        requireTLS: config.smtpPort !== 465,
         auth: { user: account, pass: password },
         connectionTimeout: TIMEOUT_MS,
         greetingTimeout: TIMEOUT_MS,

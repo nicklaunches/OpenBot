@@ -19,6 +19,7 @@ import {
   readBody,
   type SendReceipt,
   type SmtpLike,
+  type SmtpOptions,
   sentFolderFrom,
   strippedHtml,
   withDeadline,
@@ -1815,5 +1816,60 @@ describe("what a model is told about the copy", () => {
     expect(result.isError).toBe(false);
     expect(result.text).not.toContain(PASSWORD);
     expect(result.text).toContain("[redacted]");
+  });
+});
+
+describe("the SMTP port decides the TLS mode", () => {
+  const MAIL = {
+    to: "dana@example.test",
+    subject: "The Friday numbers",
+    body: "Attached.",
+  };
+  const wire = (captured: SmtpOptions[]) => ({
+    imap: () =>
+      ({
+        connect: async () => {},
+        logout: async () => {},
+        close: () => {},
+        list: async () => [
+          { path: "Sent", name: "Sent", specialUse: "\\Sent" },
+        ],
+        append: async () => ({}) as never,
+        fetchOne: async () => null,
+      }) as unknown as ImapLike,
+    smtp: (options: SmtpOptions) => {
+      captured.push(options);
+      return {
+        sendMail: async () => ({}) as never,
+        close: () => {},
+      } as unknown as SmtpLike;
+    },
+  });
+
+  test("465 is implicit TLS", async () => {
+    const captured: SmtpOptions[] = [];
+    const clients = createMailboxClients(
+      { ...CONFIG, smtpPort: 465 },
+      DEFAULT_ACCOUNT,
+      PASSWORD,
+      wire(captured),
+    );
+    await clients.send(MAIL);
+    expect(captured[0]?.secure).toBe(true);
+    expect(captured[0]?.requireTLS).toBe(false);
+  });
+
+  test("587 is STARTTLS, and required rather than opportunistic", async () => {
+    const captured: SmtpOptions[] = [];
+    const clients = createMailboxClients(
+      { ...CONFIG, smtpPort: 587 },
+      DEFAULT_ACCOUNT,
+      PASSWORD,
+      wire(captured),
+    );
+    await clients.send(MAIL);
+    expect(captured[0]?.port).toBe(587);
+    expect(captured[0]?.secure).toBe(false);
+    expect(captured[0]?.requireTLS).toBe(true);
   });
 });
