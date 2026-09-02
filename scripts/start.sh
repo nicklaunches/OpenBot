@@ -221,8 +221,23 @@ done
 
 export SUPERVISOR_TOKEN COMPUTER_TOKEN WORKER_SHARED_SECRET
 export COMPUTER_PORT BOT_PORT LANGGRAPH_PORT SUPERVISOR_PORT
+# A replica that reads another instance's database runs no Postgres of its own: the service, the
+# migration and the table check below all belong to the instance that owns the data.
+DATABASE_IS_LOCAL=true
+case "$(setting DATABASE_URL "")" in
+  ""|*@localhost:*|*@localhost/*|*@127.0.0.1:*|*@127.0.0.1/*) ;;
+  *) DATABASE_IS_LOCAL=false ;;
+esac
+if [ "$DATABASE_IS_LOCAL" != true ]; then
+  without_postgres=()
+  for svc in "${SERVICES[@]}"; do
+    [ "$svc" = postgres ] || without_postgres+=("$svc")
+  done
+  SERVICES=("${without_postgres[@]}")
+  info "  database: external ($(setting DATABASE_URL "" | sed -E 's#//[^@]*@#//#')), no local Postgres"
+fi
 docker compose up -d --build "${SERVICES[@]}" >/dev/null
-if ! docker compose run --rm --build migrate >"$LOGS/migrate.log" 2>&1; then
+if [ "$DATABASE_IS_LOCAL" = true ] && ! docker compose run --rm --build migrate >"$LOGS/migrate.log" 2>&1; then
   red "  Migrations did not apply. The database is not the schema this server expects."
   red "  Log: $LOGS/migrate.log"
   exit 1
@@ -232,6 +247,7 @@ wait_for "http://localhost:$BOT_PORT/health" "agent-bot"
 wait_for "http://localhost:$LANGGRAPH_PORT/health" "agent-langgraph"
 
 for table in agent_profiles agent_preferences; do
+  [ "$DATABASE_IS_LOCAL" = true ] || break
   if ! docker compose exec -T postgres \
        psql -U openbot -d openbot -tAc "select to_regclass('public.$table')" 2>/dev/null \
        | grep -q "^$table$"; then
