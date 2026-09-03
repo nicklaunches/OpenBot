@@ -119,11 +119,12 @@ export type OutgoingMessage = {
 };
 
 /**
- * One open IMAP connection, as the four tools need it.
+ * One open IMAP connection, as the tools need it.
  *
- * Deliberately narrow. Nothing a model calls has any business deleting a message, moving one, or
- * setting a flag, so none of that is here. Same reasoning that keeps `RoutineTools` down to four of
- * `RoutineStore`'s methods.
+ * Deliberately narrow. Nothing a model calls has any business deleting a message or moving one, so
+ * none of that is here. The one flag it may touch is `\Seen`, through {@link MailboxSession.flag},
+ * because "mark these read" is the ordinary end of handling mail and is reversible by the same
+ * call. Same reasoning that keeps `RoutineTools` down to four of `RoutineStore`'s methods.
  */
 export type MailboxSession = {
   /** The newest `limit` messages in `mailbox`, newest first. */
@@ -132,6 +133,26 @@ export type MailboxSession = {
   message(mailbox: string, uid: number): Promise<FullMessage | null>;
   /** Messages whose subject, sender or text matches, newest first, at most `limit`. */
   search(mailbox: string, query: string, limit: number): Promise<MessagePage>;
+  /** Set (`seen`) or clear `\Seen` on each of `uids` in `mailbox`, and say what that did. */
+  flag(mailbox: string, uids: number[], seen: boolean): Promise<FlagReceipt>;
+};
+
+/**
+ * What one flag change did, uid by uid.
+ *
+ * THREE LISTS RATHER THAN A COUNT, because a STORE answers nothing about which messages it touched:
+ * a uid that is not in the folder is silently skipped by the server, and a message already in the
+ * asked-for state is "changed" to it without a word. Reported as one number, "marked 5 read" would
+ * be true of a call that found two. So the flags are read first, and the receipt says which uids
+ * were actually flipped, which were already there, and which the folder does not hold.
+ */
+export type FlagReceipt = {
+  /** The uids whose flag was actually changed. */
+  changed: number[];
+  /** The uids that were already in the asked-for state and were left alone. */
+  unchanged: number[];
+  /** The uids the folder does not hold. */
+  missing: number[];
 };
 
 /**
@@ -544,6 +565,8 @@ export type ImapLike = Pick<
   | "search"
   | "list"
   | "append"
+  | "messageFlagsAdd"
+  | "messageFlagsRemove"
 >;
 
 /** As much of nodemailer as this module speaks. */
@@ -780,6 +803,61 @@ export function createMailboxClients(
               // How many matched, not how many are being shown. A search that found 300 and is
               // answering with 20 has to be able to say so.
               return { headers: headers.reverse(), total: uids.length };
+            });
+          },
+
+          async flag(mailbox, uids, seen) {
+            return withMailbox(client, mailbox, async () => {
+              /*
+               * READ BEFORE WRITE, for the receipt. A STORE says nothing about which uids it
+               * touched: the server skips a uid that is not there without a word, and re-sets a
+               * flag that was already set without one. So the flags are fetched first, and the
+               * write is issued only for the uids that need it. That also keeps the answer honest
+               * about a folder that changed under the model: a uid deleted since the listing is
+               * reported missing rather than counted as marked.
+               */
+              const wanted = [...new Set(uids)].sort((a, b) => a - b);
+              const current = new Map<number, boolean>();
+              for await (const message of client.fetch(
+                wanted,
+                { uid: true, flags: true },
+                { uid: true },
+              )) {
+                current.set(message.uid, message.flags?.has("\\Seen") ?? false);
+              }
+
+              const receipt: FlagReceipt = {
+                changed: [],
+                unchanged: [],
+                missing: [],
+              };
+              for (const uid of wanted) {
+                const state = current.get(uid);
+                if (state === undefined) receipt.missing.push(uid);
+                else if (state === seen) receipt.unchanged.push(uid);
+                else receipt.changed.push(uid);
+              }
+              if (receipt.changed.length === 0) return receipt;
+
+              const stored = seen
+                ? await client.messageFlagsAdd(receipt.changed, ["\\Seen"], {
+                    uid: true,
+                  })
+                : await client.messageFlagsRemove(receipt.changed, ["\\Seen"], {
+                    uid: true,
+                  });
+              /*
+               * imapflow answers `false` for a STORE the server refused rather than throwing, and a
+               * refusal that came back as a receipt saying "changed" would be the one lie this
+               * receipt exists to prevent. A read-only folder (a shared or virtual one) is the
+               * usual reason.
+               */
+              if (!stored) {
+                throw new MailboxError(
+                  `The mail server refused to change the read flag in folder ${mailbox} of ${account}. The folder may be read-only. Nothing was marked.`,
+                );
+              }
+              return receipt;
             });
           },
         };

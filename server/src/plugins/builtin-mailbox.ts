@@ -1,6 +1,7 @@
 import type { MailboxConfig } from "../config";
 import {
   createMailboxClients,
+  type FlagReceipt,
   type FullMessage,
   MAX_BODY_CHARS,
   MAX_SOURCE_BYTES,
@@ -137,6 +138,17 @@ const SEARCH_LIMIT = { fallback: 20, max: 50 } as const;
 const MAX_UID = 4_294_967_295;
 
 /**
+ * How many messages one `mark_read` or `mark_unread` call may touch.
+ *
+ * Refused above this rather than capped, which is the opposite of what {@link boundedLimit} does
+ * with a listing, and the difference is what a partial answer would mean. A listing cut at fifty is
+ * still a listing; a marking cut at a hundred is a hundred messages marked and the rest silently
+ * not, which the model would have to discover by listing again. The cap is well above what a Bot
+ * handling a mailbox by hand ever names in one go, and the refusal says the number.
+ */
+const MAX_MARKED = 100;
+
+/**
  * What a call answers when this deployment has no mailbox configured.
  *
  * Names all four things, including the one that is not an environment variable, because the half a
@@ -165,7 +177,7 @@ function noPassword(account: string): string {
 }
 
 /**
- * The four tools, as the same shape a server would have answered `tools/list` with.
+ * The six tools, as the same shape a server would have answered `tools/list` with.
  *
  * THE DESCRIPTIONS CARRY THE THINGS A MODEL CANNOT SEE. Two of them matter enough to be spelled out
  * rather than implied by a field name. The first is that a uid belongs to one mailbox: a uid read
@@ -175,7 +187,7 @@ function noPassword(account: string): string {
  * will summarize somebody else's inbox to them without either party ever saying so.
  */
 /**
- * The `folder` argument, in the one wording all four tools use.
+ * The `folder` argument, in the one wording all six tools use.
  *
  * IT SAYS WHAT IT IS NOT, and that sentence is the whole point of this constant. A smaller model
  * given two arguments that both read as "which mailbox" puts the email address in the wrong one:
@@ -221,7 +233,8 @@ const TOOLS: readonly McpTool[] = Object.freeze([
       "Open one message and read it: its headers and its text, by the uid from `list_messages` or",
       "`search_messages`.",
       "",
-      "A long message is cut off and says so. Nothing is marked read, moved or deleted by opening it.",
+      "A long message is cut off and says so. Nothing is marked read, moved or deleted by opening it:",
+      "to mark it read once it is handled, call `mark_read`.",
       "",
       "Pass the same `folder` the uid came from. Uids are per folder, so a uid listed in one names a",
       "different message in another.",
@@ -263,6 +276,57 @@ const TOOLS: readonly McpTool[] = Object.freeze([
         folder: FOLDER_ARGUMENT,
       },
       required: ["query"],
+    },
+  },
+  {
+    name: "mark_read",
+    description: [
+      "Mark messages as read, by uid. Use it once a message has been dealt with, so the mailbox's",
+      "unread state reflects what has actually been handled. It changes nothing else about a message:",
+      "nothing is moved, deleted or answered.",
+      "",
+      "The answer says which uids were marked, which were already read and were left alone, and which",
+      "are not in the folder at all. `mark_unread` reverses it.",
+      "",
+      "Pass the same `folder` the uids came from. Uids are per folder, so a uid listed in one names a",
+      "different message in another.",
+    ].join("\n"),
+    inputSchema: {
+      type: "object",
+      properties: {
+        uids: {
+          type: "array",
+          items: { type: "integer" },
+          description: `The uids to mark, from a listing or a search. One is fine. At most ${MAX_MARKED} in one call.`,
+        },
+        folder: FOLDER_ARGUMENT,
+      },
+      required: ["uids"],
+    },
+  },
+  {
+    name: "mark_unread",
+    description: [
+      "Mark messages as unread, by uid, so they show as new again in the mailbox. The reverse of",
+      "`mark_read`; nothing else about a message changes.",
+      "",
+      "The answer says which uids were marked, which were already unread and were left alone, and",
+      "which are not in the folder at all.",
+      "",
+      "Pass the same `folder` the uids came from. Uids are per folder, so a uid listed in one names a",
+      "different message in another.",
+    ].join("\n"),
+    inputSchema: {
+      type: "object",
+      properties: {
+        uids: {
+          type: "array",
+          items: { type: "integer" },
+          description: `The uids to mark, from a listing or a search. One is fine. At most ${MAX_MARKED} in one call.`,
+        },
+        folder: FOLDER_ARGUMENT,
+      },
+      required: ["uids"],
     },
   },
   {
@@ -328,7 +392,7 @@ type Connection = {
 /**
  * The list is static and needs neither a credential nor a configured mailbox.
  *
- * The four definitions are schemas in this file: nothing to discover, nobody to ask. Listing them
+ * The six definitions are schemas in this file: nothing to discover, nobody to ask. Listing them
  * without a mailbox configured is deliberate rather than an oversight. An administrator sets a
  * connector up and grants its tools before, or instead of, the deployment ever having the secret,
  * and a tool list that emptied itself when a variable was unset would revoke grants by accident.
@@ -443,6 +507,69 @@ function integerArg(
 }
 
 /**
+ * The uids a marking call names, in every shape a model writes them in.
+ *
+ * The schema says an array of integers, and that is what a careful model sends. What arrives in
+ * practice also includes one bare number for a single message, the array as a comma-separated
+ * string (`"5632, 5620"`), and the whole thing under `uid` because the last three calls took that
+ * name. Each is an unambiguous intention, so each is read rather than refused; a refusal would
+ * spend a turn on JSON shape when the message to mark was never in doubt.
+ *
+ * What IS refused is the same as {@link integerArg} refuses: a fraction, a zero, a word. A uid is an
+ * identity, and there is no message that `12.7` rounds to. Refused as a whole rather than skipping
+ * the bad one, because a call that marked four of the five it named would have to say so, and a
+ * model told that will retry the fifth as a fresh number.
+ *
+ * Empty is refused too, in the same words a missing `uid` gets, so "mark them read" with nothing
+ * named is answered with what to name. Duplicates are one uid: naming a message twice is not two
+ * messages.
+ */
+export function uidsArg(args: Record<string, unknown>): {
+  uids?: number[];
+  error?: string;
+} {
+  const raw = args.uids ?? args.uid;
+  const parts: unknown[] =
+    raw === undefined || raw === null
+      ? []
+      : Array.isArray(raw)
+        ? raw
+        : typeof raw === "string"
+          ? raw.split(/[\s,]+/).filter((part) => part !== "")
+          : [raw];
+
+  const uids: number[] = [];
+  for (const part of parts) {
+    const value =
+      typeof part === "number"
+        ? part
+        : typeof part === "string"
+          ? Number(part.trim())
+          : Number.NaN;
+    if (!Number.isInteger(value) || value < 1) {
+      return {
+        error: `\`uids\` has to be a list of whole numbers, each at least 1; ${JSON.stringify(part)} is not one. Nothing was marked.`,
+      };
+    }
+    uids.push(value);
+  }
+
+  const distinct = [...new Set(uids)];
+  if (distinct.length === 0) {
+    return {
+      error:
+        "Say which messages to mark, as `uids`, from list_messages or search_messages.",
+    };
+  }
+  if (distinct.length > MAX_MARKED) {
+    return {
+      error: `${distinct.length} uids is more than the ${MAX_MARKED} one call marks. Nothing was marked; split them across calls.`,
+    };
+  }
+  return { uids: distinct };
+}
+
+/**
  * How many messages one call returns, and whether the ask was cut down.
  *
  * Capped rather than refused, which is the opposite of what this file does with a malformed number,
@@ -526,6 +653,47 @@ function headerLine(header: MessageHeader): string {
     `"${header.subject || "(no subject)"}"`,
     header.seen ? "read" : "unread",
   ].join(" · ");
+}
+
+/**
+ * What a marking did, as sentences a model can check against the listing it worked from.
+ *
+ * EVERY UID IS NAMED, in one of three lists, so the answer is exactly as long as the ask and nothing
+ * is summarized into a count. "Marked 5 read" over a call that found two would be the lie the
+ * receipt exists to prevent (see `FlagReceipt`); naming the two, the ones that already were, and
+ * the ones that are not there is the same fact a person would want after doing it by hand.
+ *
+ * The missing ones are said last and in the same words `read_message` uses for a uid that is not
+ * there, and the reason is the reason those words exist: a uid that is not in this folder is almost
+ * always a uid from another folder, and the fix is to say which.
+ */
+export function markedInWords(
+  receipt: FlagReceipt,
+  seen: boolean,
+  place: string,
+): string {
+  const state = seen ? "read" : "unread";
+  const list = (uids: number[]) => uids.join(", ");
+  const count = (n: number) => (n === 1 ? "1 message" : `${n} messages`);
+  const lines: string[] = [];
+  if (receipt.changed.length > 0) {
+    lines.push(
+      `Marked ${count(receipt.changed.length)} ${state} in ${place}: uid ${list(receipt.changed)}.`,
+    );
+  }
+  if (receipt.unchanged.length > 0) {
+    lines.push(
+      receipt.changed.length > 0
+        ? `${receipt.unchanged.length === 1 ? "uid" : "uids"} ${list(receipt.unchanged)} ${receipt.unchanged.length === 1 ? "was" : "were"} already ${state} and left alone.`
+        : `${receipt.unchanged.length === 1 ? "uid" : "uids"} ${list(receipt.unchanged)} ${receipt.unchanged.length === 1 ? "was" : "were"} already ${state} in ${place}, so nothing changed.`,
+    );
+  }
+  if (receipt.missing.length > 0) {
+    lines.push(
+      `There is no message with uid ${list(receipt.missing)} in ${place}. Uids are per folder, so check the listing ${receipt.missing.length === 1 ? "this one" : "these"} came from.`,
+    );
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -939,6 +1107,38 @@ async function runTool(
           ...pageNotes(page, capped, SEARCH_LIMIT.max, `matches in ${place}`),
         ].join("\n"),
       );
+    }
+
+    if (toolName === "mark_read" || toolName === "mark_unread") {
+      const seen = toolName === "mark_read";
+      const asked = uidsArg(args);
+      if (asked.error || !asked.uids) {
+        return failure(asked.error ?? "Say which messages to mark.");
+      }
+      /*
+       * A number no mailbox could hold is a message that is not there, answered before dialling
+       * and in the words `read_message` uses. Separated from the ones that might exist rather
+       * than failing the whole call, because the rest of the list is still a clear ask.
+       */
+      const impossible = asked.uids.filter((uid) => uid > MAX_UID);
+      const possible = asked.uids.filter((uid) => uid <= MAX_UID);
+      if (possible.length === 0) {
+        return failure(noSuchMessage(impossible[0] as number, place));
+      }
+
+      const receipt = await clients.withSession((session) =>
+        session.flag(folder, possible, seen),
+      );
+      const missing = [...receipt.missing, ...impossible];
+      const text = markedInWords({ ...receipt, missing }, seen, place);
+      /*
+       * A failure only when nothing named was there to mark. One missing uid among several that
+       * were marked is a note on a success, since the marking happened and undoing it would be
+       * the surprise; a list where none existed is a call that did nothing, and says so as one.
+       */
+      const nothingThere =
+        receipt.changed.length === 0 && receipt.unchanged.length === 0;
+      return nothingThere ? failure(text) : asResult(text);
     }
 
     if (toolName === "send_message") {

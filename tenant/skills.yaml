@@ -269,11 +269,16 @@ skills:
       the reply threads under the original. Never send to an address nobody asked you to write to.
       A send that returned a message id was delivered to the mail server; to confirm it, read the
       folder Sent of that account rather than the INBOX, and never send the same message twice
-      because you could not find it.
+      because you could not find it. Once a message has been dealt with, whether answered, filed as a
+      ticket, or judged to need nothing, call mark_read with its uid and the same account and folder
+      so the mailbox shows what has been handled; mark_unread puts one back for a person to look at.
+      Reading a message never marks it, so do this deliberately and say which uids you marked.
     tools:
       - mailbox/list_messages
       - mailbox/read_message
       - mailbox/search_messages
+      - mailbox/mark_read
+      - mailbox/mark_unread
       - mailbox/send_message
 
   - slug: search-console

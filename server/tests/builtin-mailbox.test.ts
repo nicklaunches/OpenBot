@@ -3,6 +3,7 @@ import type { MailboxConfig } from "../src/config";
 import {
   composeMessage,
   createMailboxClients,
+  type FlagReceipt,
   type FullMessage,
   type ImapLike,
   MAX_BODY_CHARS,
@@ -111,6 +112,7 @@ type Recorded =
   | { method: "recent"; mailbox: string; limit: number }
   | { method: "message"; mailbox: string; uid: number }
   | { method: "search"; mailbox: string; query: string; limit: number }
+  | { method: "flag"; mailbox: string; uids: number[]; seen: boolean }
   | { method: "send"; message: OutgoingMessage };
 
 type Stubs = {
@@ -121,6 +123,11 @@ type Stubs = {
     query: string,
     limit: number,
   ) => Promise<MessagePage>;
+  flag?: (
+    mailbox: string,
+    uids: number[],
+    seen: boolean,
+  ) => Promise<FlagReceipt>;
   send?: (message: OutgoingMessage) => Promise<SendReceipt>;
   password?: (account: string) => Promise<string | null>;
   /** A deployment configured differently from {@link CONFIG}, for the allowlist cases. */
@@ -171,6 +178,12 @@ function recordingMailbox(stubs: Stubs = {}): {
             ? await stubs.search(mailbox, query, limit)
             : onePage();
         },
+        async flag(mailbox, uids, seen) {
+          calls.push({ method: "flag", mailbox, uids, seen });
+          return stubs.flag
+            ? await stubs.flag(mailbox, uids, seen)
+            : { changed: [...uids], unchanged: [], missing: [] };
+        },
       };
       return {
         withSession: (use) => use(session),
@@ -198,12 +211,14 @@ afterEach(() => {
 });
 
 describe("the tool list", () => {
-  test("is the four mailbox tools, named exactly", async () => {
+  test("is the six mailbox tools, named exactly", async () => {
     const tools = await listTools();
     expect(tools.map((tool) => tool.name)).toEqual([
       "list_messages",
       "read_message",
       "search_messages",
+      "mark_read",
+      "mark_unread",
       "send_message",
     ]);
     for (const tool of tools) {
@@ -222,6 +237,8 @@ describe("the tool list", () => {
     expect(required.list_messages).toEqual([]);
     expect(required.read_message).toEqual(["uid"]);
     expect(required.search_messages).toEqual(["query"]);
+    expect(required.mark_read).toEqual(["uids"]);
+    expect(required.mark_unread).toEqual(["uids"]);
     expect(required.send_message).toEqual(["to", "subject", "body"]);
   });
 
@@ -322,7 +339,7 @@ describe("the tool list", () => {
     // The only call site is `refreshTools`, which passes `{url, token}`. A list that emptied itself
     // when a variable was unset would revoke an administrator's grants by accident.
     useMailbox(null);
-    expect(await listTools()).toHaveLength(4);
+    expect(await listTools()).toHaveLength(6);
   });
 });
 
@@ -333,6 +350,8 @@ describe("a deployment with no mailbox", () => {
       "list_messages",
       "read_message",
       "search_messages",
+      "mark_read",
+      "mark_unread",
       "send_message",
     ]) {
       const result = await callTool(CONNECTION, tool, { uid: 1 });
@@ -987,6 +1006,181 @@ describe("searching", () => {
       `Nothing in folder INBOX of ${DEFAULT_ACCOUNT} matches "invoice"`,
     );
     expect(result.text).toContain("nothing here to answer from");
+  });
+});
+
+describe("marking read and unread", () => {
+  test("sets \\Seen on the uids named, in the folder they came from, and names each one back", async () => {
+    const { calls } = recordingMailbox();
+    const result = await callTool(CONNECTION, "mark_read", {
+      uids: [5632, 5620, 5644],
+      folder: "Archive",
+    });
+
+    expect(result.isError).toBe(false);
+    expect(calls).toEqual([
+      {
+        method: "flag",
+        mailbox: "Archive",
+        uids: [5632, 5620, 5644],
+        seen: true,
+      },
+    ]);
+    expect(result.text).toBe(
+      `Marked 3 messages read in folder Archive of ${DEFAULT_ACCOUNT}: uid 5632, 5620, 5644.`,
+    );
+  });
+
+  test("clears \\Seen for mark_unread, through the same session call", async () => {
+    const { calls } = recordingMailbox();
+    const result = await callTool(CONNECTION, "mark_unread", { uids: [7] });
+
+    expect(result.isError).toBe(false);
+    expect(calls).toEqual([
+      { method: "flag", mailbox: "INBOX", uids: [7], seen: false },
+    ]);
+    expect(result.text).toBe(
+      `Marked 1 message unread in folder INBOX of ${DEFAULT_ACCOUNT}: uid 7.`,
+    );
+  });
+
+  test("reads the uids in every shape a model writes them", async () => {
+    /*
+     * The schema says an array of integers. What arrives also includes one bare number, the list
+     * as a string, digits as strings, and the whole thing under `uid` because the last three calls
+     * took that name. Each is an unambiguous intention, so each reaches the mailbox.
+     */
+    const { calls } = recordingMailbox();
+    await callTool(CONNECTION, "mark_read", { uids: 42 });
+    await callTool(CONNECTION, "mark_read", { uids: "5632, 5620 5644" });
+    await callTool(CONNECTION, "mark_read", { uids: ["3", 4] });
+    await callTool(CONNECTION, "mark_read", { uid: 9 });
+    // Naming a message twice is not two messages.
+    await callTool(CONNECTION, "mark_read", { uids: [1, 1, 2] });
+    expect(calls.map((call) => (call as { uids?: number[] }).uids)).toEqual([
+      [42],
+      [5632, 5620, 5644],
+      [3, 4],
+      [9],
+      [1, 2],
+    ]);
+  });
+
+  test("refuses nothing, a fraction, a word and too many, without dialling", async () => {
+    const { calls } = recordingMailbox();
+    const nothing = await callTool(CONNECTION, "mark_read", {});
+    expect(nothing.isError).toBe(true);
+    expect(nothing.text).toContain("Say which messages to mark");
+
+    const empty = await callTool(CONNECTION, "mark_read", { uids: [] });
+    expect(empty.isError).toBe(true);
+    expect(empty.text).toContain("Say which messages to mark");
+
+    const fraction = await callTool(CONNECTION, "mark_read", {
+      uids: [1, 12.7],
+    });
+    expect(fraction.isError).toBe(true);
+    expect(fraction.text).toContain("whole numbers");
+    expect(fraction.text).toContain("12.7");
+    expect(fraction.text).toContain("Nothing was marked");
+
+    const word = await callTool(CONNECTION, "mark_unread", { uids: ["all"] });
+    expect(word.isError).toBe(true);
+    expect(word.text).toContain('"all"');
+
+    const many = await callTool(CONNECTION, "mark_read", {
+      uids: Array.from({ length: 101 }, (_, i) => i + 1),
+    });
+    expect(many.isError).toBe(true);
+    expect(many.text).toContain("101 uids is more than the 100");
+    expect(many.text).toContain("Nothing was marked");
+
+    expect(calls).toEqual([]);
+  });
+
+  test("says which were already in that state and which are not there, and still succeeds", async () => {
+    recordingMailbox({
+      flag: async () => ({ changed: [5632], unchanged: [5620], missing: [99] }),
+    });
+    const result = await callTool(CONNECTION, "mark_read", {
+      uids: [5632, 5620, 99],
+    });
+
+    // The marking happened, so this is a success with notes, not a failure that would send a model
+    // back to undo something.
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain(
+      `Marked 1 message read in folder INBOX of ${DEFAULT_ACCOUNT}: uid 5632.`,
+    );
+    expect(result.text).toContain("uid 5620 was already read and left alone.");
+    expect(result.text).toContain("no message with uid 99 in folder INBOX");
+    expect(result.text).toContain("per folder");
+  });
+
+  test("nothing to change is said in words and is not a failure", async () => {
+    recordingMailbox({
+      flag: async () => ({ changed: [], unchanged: [1, 2], missing: [] }),
+    });
+    const result = await callTool(CONNECTION, "mark_unread", { uids: [1, 2] });
+    expect(result.isError).toBe(false);
+    expect(result.text).toBe(
+      `uids 1, 2 were already unread in folder INBOX of ${DEFAULT_ACCOUNT}, so nothing changed.`,
+    );
+  });
+
+  test("a list where nothing named exists is a failure that names them", async () => {
+    recordingMailbox({
+      flag: async () => ({ changed: [], unchanged: [], missing: [8, 9] }),
+    });
+    const result = await callTool(CONNECTION, "mark_read", { uids: [8, 9] });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("no message with uid 8, 9 in folder INBOX");
+  });
+
+  test("a uid too large for IMAP is a message that is not there, and the rest still go", async () => {
+    const { calls } = recordingMailbox();
+    const result = await callTool(CONNECTION, "mark_read", {
+      uids: [5, 4_294_967_296],
+    });
+    // The impossible one never reaches the wire; the possible one does.
+    expect(calls).toEqual([
+      { method: "flag", mailbox: "INBOX", uids: [5], seen: true },
+    ]);
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("Marked 1 message read");
+    expect(result.text).toContain("no message with uid 4294967296");
+
+    const only = await callTool(CONNECTION, "mark_read", {
+      uids: [4_294_967_296],
+    });
+    expect(only.isError).toBe(true);
+    expect(calls).toHaveLength(1);
+  });
+
+  test("works in the account it was told to, and says which", async () => {
+    const { calls, unlocked } = recordingMailbox();
+    const result = await callTool(CONNECTION, "mark_read", {
+      account: ACCOUNTS[1],
+      uids: [3],
+    });
+    expect(unlocked).toEqual([ACCOUNTS[1]]);
+    expect(calls).toEqual([
+      { method: "flag", mailbox: "INBOX", uids: [3], seen: true },
+    ]);
+    expect(result.text).toContain(`folder INBOX of ${ACCOUNTS[1]}`);
+  });
+
+  test("a server that refuses the STORE is reported as nothing marked", async () => {
+    recordingMailbox({
+      flag: async () => {
+        throw new MailboxError(
+          "The mail server refused to change the read flag in folder INBOX of support@example.test. The folder may be read-only. Nothing was marked.",
+        );
+      },
+    });
+    const result = await callTool(CONNECTION, "mark_read", { uids: [3] });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("Nothing was marked");
   });
 });
 
@@ -1871,5 +2065,109 @@ describe("the SMTP port decides the TLS mode", () => {
     expect(captured[0]?.port).toBe(587);
     expect(captured[0]?.secure).toBe(false);
     expect(captured[0]?.requireTLS).toBe(true);
+  });
+});
+
+describe("the flag change on the wire", () => {
+  type Stored = { range: number[]; flags: string[]; options: unknown };
+
+  /**
+   * The real client wired to an IMAP that records what it was asked, holding `seen` uids.
+   *
+   * What is worth asserting here cannot be seen one level up: that the flags are READ before the
+   * STORE, that the STORE names only the uids that need it and by uid rather than by sequence,
+   * and that a server answering `false` becomes a refusal rather than a receipt.
+   */
+  function wired(options: {
+    seen: number[];
+    exists: number[];
+    refuse?: boolean;
+  }) {
+    const added: Stored[] = [];
+    const removed: Stored[] = [];
+    const fetched: unknown[] = [];
+    const clients = createMailboxClients(CONFIG, DEFAULT_ACCOUNT, PASSWORD, {
+      imap: () =>
+        ({
+          connect: async () => {},
+          logout: async () => {},
+          close: () => {},
+          getMailboxLock: async () => ({ release: () => {} }),
+          fetch: async function* (
+            range: number[],
+            _query: unknown,
+            fetchOptions: unknown,
+          ) {
+            fetched.push({ range, options: fetchOptions });
+            for (const uid of range) {
+              if (!options.exists.includes(uid)) continue;
+              yield {
+                uid,
+                flags: new Set(options.seen.includes(uid) ? ["\\Seen"] : []),
+              };
+            }
+          },
+          messageFlagsAdd: async (
+            range: number[],
+            flags: string[],
+            storeOptions: unknown,
+          ) => {
+            added.push({ range, flags, options: storeOptions });
+            return !options.refuse;
+          },
+          messageFlagsRemove: async (
+            range: number[],
+            flags: string[],
+            storeOptions: unknown,
+          ) => {
+            removed.push({ range, flags, options: storeOptions });
+            return !options.refuse;
+          },
+        }) as unknown as ImapLike,
+    });
+    return { clients, added, removed, fetched };
+  }
+
+  test("reads the flags first, then stores only for the uids that need it, by uid", async () => {
+    const { clients, added, removed, fetched } = wired({
+      exists: [1, 2, 3],
+      seen: [2],
+    });
+    const receipt = await clients.withSession((session) =>
+      session.flag("INBOX", [3, 1, 2, 9], true),
+    );
+
+    expect(fetched).toEqual([{ range: [1, 2, 3, 9], options: { uid: true } }]);
+    expect(added).toEqual([
+      { range: [1, 3], flags: ["\\Seen"], options: { uid: true } },
+    ]);
+    expect(removed).toEqual([]);
+    expect(receipt).toEqual({ changed: [1, 3], unchanged: [2], missing: [9] });
+  });
+
+  test("clears the flag through the remove command, and never stores when nothing needs it", async () => {
+    const { clients, added, removed } = wired({ exists: [1, 2], seen: [1] });
+    const cleared = await clients.withSession((session) =>
+      session.flag("INBOX", [1, 2], false),
+    );
+    expect(removed).toEqual([
+      { range: [1], flags: ["\\Seen"], options: { uid: true } },
+    ]);
+    expect(cleared).toEqual({ changed: [1], unchanged: [2], missing: [] });
+
+    // Everything already unread: the receipt says so and no STORE is issued at all.
+    const nothing = await clients.withSession((session) =>
+      session.flag("INBOX", [2], false),
+    );
+    expect(nothing).toEqual({ changed: [], unchanged: [2], missing: [] });
+    expect(added).toEqual([]);
+    expect(removed).toHaveLength(1);
+  });
+
+  test("a server that answers no to the STORE is a refusal, not a receipt", async () => {
+    const { clients } = wired({ exists: [1], seen: [], refuse: true });
+    await expect(
+      clients.withSession((session) => session.flag("INBOX", [1], true)),
+    ).rejects.toThrow(/refused to change the read flag.*Nothing was marked/);
   });
 });

@@ -8,6 +8,20 @@ Newest first. `Unreleased` is what is on `main` and not yet tagged.
 
 ## Unreleased
 
+### A Bot can mark mail read and unread
+
+The Mailbox connector has two new tools, `mark_read` and `mark_unread`, each taking a list of uids
+and the folder they came from. Until now a Bot that had handled a message had no way to say so in
+the mailbox itself, and a person opening it afterwards found everything still unread. Both are
+granted per Bot like the other four, and both are classified as writes, so a policy that gates
+writes covers them; a deployment that approval-gates `send_message` will want a narrower rule than
+"every write", since a marking is one flag on the deployment's own server and reversible by the
+other call. The answer names every uid: marked, already in that state, or not in the folder.
+
+After upgrading, press **Refresh** on `/admin/plugins/mailbox` so the stored tool list carries the
+two new names, then grant them to the Bots that should have them. Nothing is offered until both are
+done.
+
 ### Coworkers are made in a wizard and managed in a dialog
 
 Creating a coworker is now a three-step wizard — who it is, who may see it, then where it runs,
