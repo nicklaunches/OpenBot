@@ -103,6 +103,7 @@ describe("which servers this deployment will talk to", () => {
           "builtin://routines",
           "builtin://mailbox",
           "builtin://search-console",
+          "builtin://firecrawl",
         ]).toContain(entry.host);
       } else {
         expect(entry.host.startsWith("https://")).toBe(true);
@@ -413,6 +414,83 @@ describe("Search Console", () => {
     expect(classifyTool(entry, "submit_sitemap", false)).toBe("write");
     for (const name of ["list_sites", "search_analytics"]) {
       expect(classifyTool(entry, name, false)).toBe("write");
+    }
+  });
+});
+
+describe("Firecrawl", () => {
+  const entry = catalogueEntry("firecrawl");
+
+  test("is in the catalogue and resolves to its own builtin address", () => {
+    expect(entry).not.toBeNull();
+    expect(resolveServerUrl("firecrawl")?.url).toBe("builtin://firecrawl");
+  });
+
+  test("is reached as the deployment, on a key resolved from the vault rather than the server row", () => {
+    /*
+     * A self-hosted instance with one API key: the Search Console shape. There is no per-person half
+     * to consent to, and the key is not pointed at through `credential_id`, so nothing an
+     * administrator attaches to the row is ever spent.
+     */
+    expect(entry?.auth).toEqual({ kind: "builtin", reachedAs: "deployment" });
+    expect(serverCredentialKind(entry as CatalogueEntry)).toBeNull();
+    expect(entry?.transport).toBe("builtin-firecrawl");
+  });
+
+  test("names no write tools, because every tool reads a public page", () => {
+    expect(entry?.writeTools).toEqual([]);
+    for (const name of ["scrape", "map_site", "find_contacts"]) {
+      expect(classifyTool(entry, name, true)).toBe("read");
+    }
+    // A name nothing here has vouched for is still a write.
+    expect(classifyTool(entry, "crawl", false)).toBe("write");
+  });
+});
+
+describe("Nick Launches", () => {
+  const entry = catalogueEntry("nicklaunches");
+
+  test("is in the catalogue at the site's own MCP path, over https", () => {
+    expect(entry).not.toBeNull();
+    expect(resolveServerUrl("nicklaunches")?.url).toBe(
+      "https://nicklaunches.com/api/mcp/",
+    );
+    expect(
+      hostAdmissible(entry as CatalogueEntry, "https://nicklaunches.com"),
+    ).toBe(true);
+    expect(
+      hostAdmissible(
+        entry as CatalogueEntry,
+        "https://nicklaunches.com.evil.test",
+      ),
+    ).toBe(false);
+  });
+
+  test("needs no credential, because its reading tools answer anybody", () => {
+    /*
+     * The first entry with `kind: "none"`. Nothing is attached to the server row and nothing is
+     * minted per person: the connection carries no token, and the vendor answers the reads as it
+     * would answer a browser.
+     */
+    expect(entry?.auth).toEqual({ kind: "none" });
+    expect(serverCredentialKind(entry as CatalogueEntry)).toBeNull();
+    // The default transport: a remote MCP server like any other.
+    expect(entry?.transport).toBeUndefined();
+  });
+
+  test("names the two tools that act on an account as writes", () => {
+    expect(entry?.writeTools).toEqual(["submit_product", "connect_account"]);
+    for (const name of [
+      "search_products",
+      "get_product",
+      "list_launch_directories",
+      "check_launch_readiness",
+      "get_my_launches",
+    ]) {
+      expect(classifyTool(entry, name, true)).toBe("read");
+    }
+    for (const name of ["submit_product", "connect_account"]) {
+      expect(classifyTool(entry, name, true)).toBe("write");
     }
   });
 });

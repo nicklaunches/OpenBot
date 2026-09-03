@@ -64,6 +64,7 @@ import { createDatabase } from "./db/client";
 import { intelligenceChannelMappings } from "./db/schema";
 import { createOnboardingStore } from "./people/onboarding";
 import { createPeopleStore } from "./people/store";
+import { firecrawlCredential, useFirecrawl } from "./plugins/builtin-firecrawl";
 import { mailboxCredentialFor, useMailbox } from "./plugins/builtin-mailbox";
 import { useRoutineTools } from "./plugins/builtin-routines";
 import {
@@ -417,6 +418,33 @@ useSearchConsole(
             held.id,
           );
           return { id: held.id, serviceAccount };
+        },
+      }
+    : null,
+);
+
+/**
+ * Firecrawl, and where its API key comes from.
+ *
+ * The same seam and the same rule as Search Console above: what is installed is a way to read the
+ * key, not the key, so a rotation is obeyed by the next call and a revocation refuses it. Nothing is
+ * installed when no instance is configured; the catalogue entry stays admissible and grantable, and
+ * a call then answers with the sentence naming what to set.
+ */
+useFirecrawl(
+  config.firecrawl
+    ? {
+        config: config.firecrawl,
+        credential: async () => {
+          const held = await credentialStore.findLiveByKey(
+            firecrawlCredential(),
+          );
+          if (!held) return null;
+          return decryptCredentialForUse(
+            config.keyEncryptionKey,
+            credentialStore,
+            held.id,
+          );
         },
       }
     : null,

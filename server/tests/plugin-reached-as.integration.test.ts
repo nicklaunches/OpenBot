@@ -51,6 +51,7 @@ const CALLS = [
     toolName: "list_sites",
     reachedAs: "deployment",
   },
+  { serverId: "firecrawl", toolName: "scrape", reachedAs: "deployment" },
 ] as const;
 
 const policy: ActionPolicy = { mode: "enforce", deny: [], allow: ["true"] };

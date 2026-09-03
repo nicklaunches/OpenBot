@@ -65,6 +65,8 @@ at `agent-langgraph` on a laptop.
 | `MAILBOX_SMTP_PORT`  | `465`                              | Implicit TLS on 465; any other port uses STARTTLS and requires it. Use 587 where a host blocks 465 outbound. |
 | `MAILBOX_ALLOWED_RECIPIENT_DOMAINS` | unset (anywhere)    | Comma-separated domains a Bot may send mail to. A policy rule cannot do this, because rules see a tool's name and effect and not its arguments; see [mailbox.md](mailbox.md). |
 | `SEARCH_CONSOLE_SITES` | unset                            | Comma-separated Search Console properties a Bot may ask about, as `sc-domain:example.com` or `https://example.com/`. The list is the boundary: a property that is not here is refused before any request, whatever the service account can see. The key is not an environment variable; it is a vault credential. See [search-console.md](search-console.md). |
+| `FIRECRAWL_BASE_URL`  | unset                              | The deployment's own Firecrawl instance, as an origin with scheme and port. Unset, the connector stays grantable and every call answers with what to set; see [firecrawl.md](firecrawl.md). |
+| `FIRECRAWL_CA_FILE`   | unset                              | Path to the PEM of the CA that signs that instance's certificate, attached to each request rather than trusted process-wide. A file that cannot be read refuses to start. The API key is a vault credential, not a variable. |
 
 **`OPENBOT_GENERATIVE_UI`** turns on generated interfaces. Set it, and a Bot may answer by writing
 the markup, styles and script for an interface and streaming it into the transcript, where it renders

@@ -1,3 +1,4 @@
+import * as builtinFirecrawl from "./builtin-firecrawl";
 import * as builtinMailbox from "./builtin-mailbox";
 import * as builtinRoutines from "./builtin-routines";
 import * as builtinSearchConsole from "./builtin-search-console";
@@ -88,7 +89,8 @@ export type TransportKind =
   | "google-drive-rest"
   | "builtin-routines"
   | "builtin-mailbox"
-  | "builtin-search-console";
+  | "builtin-search-console"
+  | "builtin-firecrawl";
 
 const TRANSPORTS: Record<TransportKind, VendorTransport> = {
   mcp,
@@ -96,6 +98,7 @@ const TRANSPORTS: Record<TransportKind, VendorTransport> = {
   "builtin-routines": builtinRoutines,
   "builtin-mailbox": builtinMailbox,
   "builtin-search-console": builtinSearchConsole,
+  "builtin-firecrawl": builtinFirecrawl,
 };
 
 /**

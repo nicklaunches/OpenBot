@@ -14,3 +14,8 @@ channels:
     description: Find authorized answers from company documents.
     permitted_agents: [knowledge]
     allowed_groups: [all]
+  - id: launch-prospecting
+    name: Launch Prospecting
+    description: Scout NL reads launch directories and records leads for Nick Launches in Notion.
+    permitted_agents: [scout-nl]
+    allowed_groups: [all]

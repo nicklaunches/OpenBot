@@ -379,6 +379,62 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
     docsUrl:
       "https://github.com/CopilotKit/OpenBot/blob/main/docs/search-console.md",
   },
+  {
+    key: "firecrawl",
+    title: "Firecrawl",
+    vendor: "Firecrawl",
+    summary:
+      "Read public web pages as markdown through the deployment's own Firecrawl instance, from turns with no browser.",
+    /*
+     * Reached in-process rather than through Firecrawl's hosted MCP server, because this deployment
+     * runs its own instance: the address is configuration, the certificate is signed by a private
+     * CA, and the key is the deployment's. The hosted server would be a `deployment-bearer` entry
+     * pointed at a vendor; this is the Search Console shape, one key held by the deployment and used
+     * for every Bot granted the tools, with no per-person half to consent to.
+     *
+     * The key is NOT reached through `credential_id` on the server row: see
+     * `plugins/builtin-firecrawl.ts`, which resolves it from the vault as the `firecrawl` credential.
+     */
+    host: "builtin://firecrawl",
+    path: "/",
+    transport: "builtin-firecrawl",
+    // Reached as the deployment: one instance, one key, the same page for everybody who asks.
+    auth: Object.freeze({ kind: "builtin", reachedAs: "deployment" }),
+    /*
+     * Empty, as a claim. Every tool reads a public page somebody else published; nothing here posts,
+     * submits or changes anything. The address check in the transport is the boundary that matters,
+     * and it is about where a read may go rather than about writing.
+     */
+    writeTools: Object.freeze([]),
+    docsUrl:
+      "https://github.com/CopilotKit/OpenBot/blob/main/docs/firecrawl.md",
+  },
+  {
+    key: "nicklaunches",
+    title: "Nick Launches",
+    vendor: "Nick Launches",
+    summary:
+      "What has launched on nicklaunches.com, whether a site is listed or ready to be, and the launch directories it has vetted.",
+    /*
+     * A remote MCP server, reached over the default transport, that needs no credential to read:
+     * `search_products`, `get_product`, `list_launch_directories` and `check_launch_readiness` are
+     * answered to anybody. The first entry with `kind: "none"`, and the shape already handles it:
+     * `connectionTokenFor` sends no token when the row holds no credential, and the admin page adds
+     * the server without asking for one.
+     *
+     * The writing tools are a different matter. `submit_product` opens a launch draft and
+     * `connect_account` pairs the session with a person's account through a one-time approval link;
+     * neither works without that pairing, and the pairing is a session on the vendor's side rather
+     * than a credential this deployment could hold. They are named as writes so the policy sees
+     * them, and a deployment that wants them grants them deliberately.
+     */
+    host: "https://nicklaunches.com",
+    path: "/api/mcp/",
+    auth: Object.freeze({ kind: "none" }),
+    writeTools: Object.freeze(["submit_product", "connect_account"]),
+    docsUrl:
+      "https://github.com/CopilotKit/OpenBot/blob/main/docs/plugins/nicklaunches.md",
+  },
 ]);
 
 const BY_KEY = new Map(CATALOGUE.map((entry) => [entry.key, entry]));

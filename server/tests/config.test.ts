@@ -946,3 +946,59 @@ describe("the deployment's Search Console properties", () => {
     }
   });
 });
+
+describe("the deployment's Firecrawl instance", () => {
+  const caFile = `${import.meta.dir}/../../certs/firecrawl-ca.crt`;
+
+  test("is absent when the variable is unset, without refusing to start", () => {
+    expect(loadConfig(baseEnvironment).firecrawl).toBeUndefined();
+    // A CA file with no address names nothing and is ignored, so a `.env` kept for later still boots.
+    expect(
+      loadConfig({ ...baseEnvironment, FIRECRAWL_CA_FILE: caFile }).firecrawl,
+    ).toBeUndefined();
+  });
+
+  test("keeps the instance's origin and nothing after it", () => {
+    expect(
+      loadConfig({
+        ...baseEnvironment,
+        FIRECRAWL_BASE_URL: "https://firecrawl.example.test:3002/v1/",
+      }).firecrawl,
+    ).toEqual({ baseUrl: "https://firecrawl.example.test:3002" });
+  });
+
+  test("reads the CA file into PEM, from an absolute or a working-directory path", () => {
+    const absolute = loadConfig({
+      ...baseEnvironment,
+      FIRECRAWL_BASE_URL: "https://62.238.103.199:3002",
+      FIRECRAWL_CA_FILE: caFile,
+    }).firecrawl;
+    expect(absolute?.ca).toContain("-----BEGIN CERTIFICATE-----");
+    expect(absolute?.ca).toBe(readFileSync(caFile, "utf8"));
+  });
+
+  test("refuses to start when the CA file cannot be read or is not a certificate", () => {
+    expect(() =>
+      loadConfig({
+        ...baseEnvironment,
+        FIRECRAWL_BASE_URL: "https://firecrawl.example.test",
+        FIRECRAWL_CA_FILE: "/nowhere/firecrawl-ca.crt",
+      }),
+    ).toThrow(
+      "FIRECRAWL_CA_FILE points at /nowhere/firecrawl-ca.crt, which cannot be read",
+    );
+    expect(() =>
+      loadConfig({
+        ...baseEnvironment,
+        FIRECRAWL_BASE_URL: "https://firecrawl.example.test",
+        FIRECRAWL_CA_FILE: `${import.meta.dir}/../package.json`,
+      }),
+    ).toThrow("is not a PEM certificate");
+  });
+
+  test("refuses an address that is not an HTTP(S) URL", () => {
+    expect(() =>
+      loadConfig({ ...baseEnvironment, FIRECRAWL_BASE_URL: "firecrawl:3002" }),
+    ).toThrow("FIRECRAWL_BASE_URL must be a valid HTTP(S) URL");
+  });
+});

@@ -3,6 +3,8 @@
  * for durable threads and memory. Configuration the product cannot function without belongs at the
  * boot boundary.
  */
+import { readFileSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 import { singleUserEnabled } from "./auth/dev-actor";
 import type { ActionPolicy } from "./computer/policy";
 import { parseActionPolicy } from "./computer/policy-store";
@@ -137,6 +139,26 @@ export type SearchConsoleConfig = {
    * around as a shape every caller has to check.
    */
   sites: readonly string[];
+};
+
+/**
+ * The deployment's own Firecrawl instance: where it is, and what signs its certificate.
+ *
+ * The address is configuration rather than a constant because this is a self-hosted instance, not a
+ * vendor's endpoint: whoever runs the deployment runs it, on an address of their choosing, usually
+ * behind a certificate a public trust store has never heard of. The CA is read once at start-up and
+ * carried as PEM, so a tool call attaches it to its request and nothing in the process stops
+ * verifying anything else.
+ *
+ * The API key is deliberately not here. It is the only secret in this feature, so it lives where the
+ * deployment's other secrets live: the vault, as the `firecrawl` credential, read per call by
+ * `plugins/builtin-firecrawl.ts`.
+ */
+export type FirecrawlConfig = {
+  /** The instance's origin, with scheme and port: `https://firecrawl.internal:3002`. */
+  baseUrl: string;
+  /** PEM of the certificate authority that signed the instance's certificate, when not public. */
+  ca?: string;
 };
 
 /**
@@ -353,6 +375,12 @@ export type DeploymentConfig = {
    * administrator's decision and should not evaporate because a variable was unset during a deploy.
    */
   searchConsole?: SearchConsoleConfig;
+  /**
+   * The deployment's Firecrawl instance. Absent means the tools refuse rather than fail, exactly as
+   * {@link DeploymentConfig.searchConsole} does and for the same reason: grants are an
+   * administrator's decision and should not evaporate because a variable was unset during a deploy.
+   */
+  firecrawl?: FirecrawlConfig;
   /** How far one Bot handing work to another may go. */
   handoff: HandoffCaps;
   /**
@@ -1094,6 +1122,44 @@ function searchConsoleConfig(
 }
 
 /**
+ * The Firecrawl instance, from `FIRECRAWL_BASE_URL` and, optionally, `FIRECRAWL_CA_FILE`.
+ *
+ * THE CA IS A FILE, NOT A VALUE. A PEM is several lines and `.env` is one line per name, so the
+ * variable names a path, relative to the working directory when it is not absolute, the way
+ * `COMPUTER_SANDBOX_TEMPLATE_FILE` does. It is read here, once, and a file that cannot be read refuses
+ * to start naming the variable: a deployment that set it meant it, and a tool that silently fell
+ * back to the public trust store would fail every call with a certificate error at the wrong end.
+ *
+ * A CA with no base URL names nothing and is ignored, so a `.env` that keeps the file for a later
+ * setup still boots.
+ */
+function firecrawlConfig(
+  environment: Environment,
+): FirecrawlConfig | undefined {
+  const base = optionalHttpUrl(environment, "FIRECRAWL_BASE_URL");
+  if (!base) return undefined;
+
+  const caFile = optional(environment, "FIRECRAWL_CA_FILE");
+  if (!caFile) return { baseUrl: base.origin };
+
+  const path = isAbsolute(caFile) ? caFile : resolve(process.cwd(), caFile);
+  let ca: string;
+  try {
+    ca = readFileSync(path, "utf8");
+  } catch {
+    throw new Error(
+      `FIRECRAWL_CA_FILE points at ${path}, which cannot be read. That file is the certificate authority that signs the Firecrawl instance's certificate.`,
+    );
+  }
+  if (!ca.includes("-----BEGIN CERTIFICATE-----")) {
+    throw new Error(
+      `FIRECRAWL_CA_FILE points at ${path}, which is not a PEM certificate.`,
+    );
+  }
+  return { baseUrl: base.origin, ca };
+}
+
+/**
  * How long the audit trail is kept.
  *
  * Refused rather than coerced, like everything else here. "We accepted your retention policy but not
@@ -1137,6 +1203,7 @@ export function loadConfig(
   const workerSharedSecret = optional(environment, "WORKER_SHARED_SECRET");
   const mailbox = mailboxConfig(environment);
   const searchConsole = searchConsoleConfig(environment);
+  const firecrawl = firecrawlConfig(environment);
 
   return {
     databaseUrl: required(environment, "DATABASE_URL"),
@@ -1172,6 +1239,7 @@ export function loadConfig(
     computer: computerConfig(environment),
     ...(mailbox ? { mailbox } : {}),
     ...(searchConsole ? { searchConsole } : {}),
+    ...(firecrawl ? { firecrawl } : {}),
     handoff: handoffCaps(environment),
     ...(optional(environment, "AGENT_TOOL_TOKEN")
       ? { agentToolToken: optional(environment, "AGENT_TOOL_TOKEN") as string }

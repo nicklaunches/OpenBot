@@ -9,9 +9,11 @@ Start with the root [README](../README.md), then use these references:
 - [Routines](routines.md): standing instructions a Bot runs on a schedule, the worker that fires them, and who they run as.
 - [Mailbox](mailbox.md): the deployment's own mailbox, the seven tools a Bot reads, marks, archives and answers it with, and where the password lives.
 - [Search Console](search-console.md): how the deployment's own sites are doing in Google Search, the four read tools, and which properties a Bot may ask about.
+- [Firecrawl](firecrawl.md): reading public web pages through the deployment's own Firecrawl instance, the three read tools, and where the key and the CA live.
 - Plugins, one connector per page — what an administrator registers, what each person consents to, and what the failures mean:
   - [Google Drive](plugins/google-drive.md)
   - [Notion](plugins/notion.md)
+  - [Nick Launches](plugins/nicklaunches.md)
 - [Deployment](deployment.md): the container, what is in the image, minimum sizes, and the platform notes.
 - [Kubernetes](../charts/openbot/README.md): the Helm chart, what a cluster needs before it, and the values that differ per cloud.
 - [Releasing](releasing.md): how a release is proposed, reviewed and published.

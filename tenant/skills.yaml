@@ -303,3 +303,82 @@ skills:
       - search-console/search_analytics
       - search-console/inspect_url
       - search-console/list_sitemaps
+
+  # Scout NL's three skills. Together they are one job, split so the per-run narrowing offers the
+  # reading tools when the message is about a directory, the contact tools when it is about one
+  # product, and the Notion writing tools when something is being saved. Every ref names a tool the
+  # Bot has to be granted separately: firecrawl and nicklaunches are catalogue entries an
+  # administrator adds and grants, and notion is the person's own connection.
+  - slug: prospect-launches
+    title: Prospect a launch directory
+    summary: Read a launch directory such as Product Hunt, pick the launches worth a Nick Launches lead, and check each against nicklaunches.com.
+    instructions: >-
+      Read the directory with firecrawl scrape. For Product Hunt, scrape https://www.producthunt.com/
+      first; when the day's launches are not on it, scrape the daily leaderboard at
+      https://www.producthunt.com/leaderboard/daily/YYYY/M/D for today's date. From the listing,
+      take each product's name, tagline, upvotes and the link to its Product Hunt page. Judge fit from
+      the tagline before reading anything else, and only for the ones that look like a paid product or
+      SaaS from an indie maker or small team, scrape the product's Product Hunt page to get its own
+      website address; do not scrape every product. Skip anything that is clearly a large company's
+      release, a free tool with no business behind it, or a bare open-source repository, and say so in
+      one line each. For each remaining product, check nicklaunches.com: call search_products with
+      the product's name and, when nothing matches by name, judge by the website address; call
+      check_launch_readiness only for products that have already passed the fit and contact checks,
+      at most ten in one run, because that tool is rate limited. A product already listed is saved
+      with On Nick Launches set to Listed and Status set to Skipped, not dropped, so it is not read
+      again tomorrow. Before saving anything, search Notion for the product name and its website
+      address and skip what is already there. Then find a contact and save the lead with the other
+      two skills. Score fit from 0 to 100: paid or SaaS, indie or small team, contact found, and not
+      listed each count, and a tagline that names a business problem counts more than one that
+      names a hobby. Finish with a short report: how many launches you read, which you saved with
+      their fit scores, and which you skipped and why.
+    tools:
+      - firecrawl/scrape
+      - firecrawl/map_site
+      - nicklaunches/search_products
+      - nicklaunches/get_product
+      - nicklaunches/check_launch_readiness
+      - notion/notion-search
+      - notion/notion-fetch
+
+  - slug: find-a-contact
+    title: Find a product's contact
+    summary: Find the email, contact form, X or LinkedIn of the people behind a product's website.
+    instructions: >-
+      Call find_contacts once with the product's own website address, never the directory page that
+      listed it. It reads the home page and the about, team, contact and pricing pages it finds and
+      returns what it found as JSON. Prefer a person's email over a generic one and a generic one
+      over a form; record X and LinkedIn as well when they are there. Use the pricing page it found
+      to settle whether the product is paid, freemium or free, and the maker hints to settle whether
+      it is a solo maker, a small team or a company. When it returns nothing, call map_site with the
+      search term contact and scrape the one page that looks right; when that finds nothing either,
+      the product has no reachable contact, and you say so rather than inventing an address.
+    tools:
+      - firecrawl/find_contacts
+      - firecrawl/map_site
+      - firecrawl/scrape
+
+  - slug: save-a-lead
+    title: Save a lead in Notion
+    summary: Create or update a row in the Product Leads database in Notion with the product, its contact, its fit and its status.
+    instructions: >-
+      Leads live in the Notion database titled Product Leads, database id
+      3d061d27-ae3f-80be-b56e-dd8025c8e90e, whose data source id is
+      3d061d27-ae3f-803b-9fc9-000b45177c27; create pages with that data source as the parent. The
+      properties are: Product (title), URL, Tagline, Source (Product Hunt, BetaList, Indie Hackers,
+      Other), Source URL, Launched on (date), Category (multi-select), Pricing (Free, Freemium, Paid,
+      Unknown), Team (Solo, Small team, Company, Unknown), Contact email, Contact name, X, LinkedIn,
+      Contact form, On Nick Launches (Not listed, Listed, Draft open, Unknown), Fit score (0 to
+      100), Fit reason (one sentence), Status (New, Qualified, Contacted, Replied, Converted,
+      Rejected, Skipped), Upvotes, Notes. Fill every property you know and leave the rest empty
+      rather than guessing. A new lead is Status New; a product that failed a rule but is worth
+      remembering, such as one already listed, is Status Skipped with the reason in Fit reason.
+      Before creating a page, search Notion for the product name and its website address; when a row
+      exists, update it rather than creating a second, and never change a Status that is anything
+      other than New or Skipped, because a person set it. Say which rows you created and which you
+      updated, by product name.
+    tools:
+      - notion/notion-search
+      - notion/notion-fetch
+      - notion/notion-create-pages
+      - notion/notion-update-page
