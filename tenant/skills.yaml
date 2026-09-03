@@ -304,6 +304,28 @@ skills:
       - search-console/inspect_url
       - search-console/list_sitemaps
 
+  # Every Bot's way to read the web without a browser: the Firecrawl tools, which an administrator
+  # grants per Bot. Declared once here and attached to each Bot in agents.yaml, so a Bot holding
+  # many tools is still offered these when a message is about a page, a site or a search.
+  - slug: read-the-web
+    title: Read the web
+    summary: Read a web page or a feed, map a site's addresses, find a site's contacts, or search the web through the deployment's Firecrawl instance.
+    instructions: >-
+      When you need what a page says and you have no browser, or reading is all you need, call
+      scrape with the address; it returns the page as markdown with its links, and an Atom or RSS
+      feed as one line per entry. To find a specific page on a site, call map_site with a search
+      term first and then scrape the one address that matches. To find how to reach the people
+      behind a site, call find_contacts once on its home address. To find a site or a fact you have
+      no address for, call search_web with a few distinctive words and open the result that is
+      clearly the right one. Say which address you read, and when a page did not load, say so
+      rather than describing what it would have said. Product Hunt refuses page reads; scrape its
+      feed at https://www.producthunt.com/feed instead.
+    tools:
+      - firecrawl/scrape
+      - firecrawl/map_site
+      - firecrawl/find_contacts
+      - firecrawl/search_web
+
   # Scout NL's three skills. Together they are one job, split so the per-run narrowing offers the
   # reading tools when the message is about a directory, the contact tools when it is about one
   # product, and the Notion writing tools when something is being saved. Every ref names a tool the
