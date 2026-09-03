@@ -439,7 +439,7 @@ describe("Firecrawl", () => {
 
   test("names no write tools, because every tool reads a public page", () => {
     expect(entry?.writeTools).toEqual([]);
-    for (const name of ["scrape", "map_site", "find_contacts"]) {
+    for (const name of ["scrape", "map_site", "find_contacts", "search_web"]) {
       expect(classifyTool(entry, name, true)).toBe("read");
     }
     // A name nothing here has vouched for is still a write.

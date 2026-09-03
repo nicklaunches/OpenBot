@@ -3,6 +3,7 @@ import type { FirecrawlConfig } from "../src/config";
 import { redacted } from "../src/firecrawl/client";
 import {
   callTool,
+  feedEntries,
   firecrawlCredential,
   harvest,
   listNeedsCredential,
@@ -106,15 +107,18 @@ afterEach(() => {
 });
 
 describe("what the connector offers", () => {
-  test("lists three read tools without a configured instance, so grants survive an unset variable", async () => {
+  test("lists four read tools without a configured instance, so grants survive an unset variable", async () => {
     const tools = await listTools();
     expect(tools.map((tool) => tool.name)).toEqual([
       "scrape",
       "map_site",
       "find_contacts",
+      "search_web",
     ]);
     for (const tool of tools) {
-      expect(tool.inputSchema).toMatchObject({ required: ["url"] });
+      expect(tool.inputSchema).toMatchObject({
+        required: [tool.name === "search_web" ? "query" : "url"],
+      });
     }
     expect(listNeedsCredential).toBe(false);
   });
@@ -330,6 +334,152 @@ describe("scrape", () => {
     });
     expect(result.isError).toBe(false);
     expect(result.text).toContain("no readable text");
+  });
+});
+
+describe("a feed read through scrape", () => {
+  const ATOM = `<?xml version="1.0" encoding="UTF-8"?>
+<feed xml:lang="en-US" xmlns="http://www.w3.org/2005/Atom">
+  <id>tag:www.producthunt.com,2005:/feed</id>
+  <title>Product Hunt</title>
+  <entry>
+    <id>tag:www.producthunt.com,2005:Post/1228465</id>
+    <published>2026-08-21T04:43:12-07:00</published>
+    <updated>2026-09-03T12:06:18-07:00</updated>
+    <link rel="alternate" type="text/html" href="https://www.producthunt.com/products/tabbitai"/>
+    <title>Tabbit AI </title>
+    <content type="html">          &lt;p&gt;
+            The Best AI Browser Build both for You and your Agents.
+          &lt;/p&gt;
+          &lt;p&gt;
+            &lt;a href="https://www.producthunt.com/products/tabbitai?utm\\_campaign=x&amp;amp;utm\\_medium=rss-feed"&gt;Discussion&lt;/a&gt;
+            |
+            &lt;a href="https://www.producthunt.com/r/p/1228465?app\\_id=339"&gt;Link&lt;/a&gt;
+          &lt;/p&gt;
+</content>
+    <author>
+      <name>Zac Zuo</name>
+    </author>
+  </entry>
+  <entry>
+    <published>2026-09-03T00:01:00-07:00</published>
+    <link rel="alternate" type="text/html" href="https://www.producthunt.com/products/quietdesk"/>
+    <title>QuietDesk &amp; Co</title>
+    <content type="html">&lt;p&gt;Focus timer for remote teams.&lt;/p&gt;</content>
+    <author><name>Ada L.</name></author>
+  </entry>
+</feed>`;
+
+  const RSS = `<?xml version="1.0"?>
+<rss version="2.0"><channel><title>Launches</title>
+<item><title><![CDATA[Ledgerly]]></title><link>https://example.test/ledgerly</link><pubDate>Wed, 03 Sep 2026 08:00:00 GMT</pubDate><description><![CDATA[<b>Invoices</b> for freelancers.]]></description><dc:creator>Sam</dc:creator></item>
+</channel></rss>`;
+
+  test("renders an Atom feed as one line per entry, in the real Product Hunt shape", () => {
+    expect(feedEntries(ATOM)).toEqual([
+      "- Tabbit AI | The Best AI Browser Build both for You and your Agents. | by Zac Zuo | 2026-08-21 | https://www.producthunt.com/products/tabbitai",
+      "- QuietDesk & Co | Focus timer for remote teams. | by Ada L. | 2026-09-03 | https://www.producthunt.com/products/quietdesk",
+    ]);
+  });
+
+  test("renders an RSS feed the same way, reading CDATA and pubDate", () => {
+    expect(feedEntries(RSS)).toEqual([
+      "- Ledgerly | Invoices for freelancers. | by Sam | 2026-09-03 | https://example.test/ledgerly",
+    ]);
+  });
+
+  test("leaves an ordinary page alone", () => {
+    expect(feedEntries("# Hello\n\nA page about <feed> readers.")).toBeNull();
+    expect(feedEntries("")).toBeNull();
+  });
+
+  test("scrape answers the entries rather than the XML", async () => {
+    install([
+      page(ATOM, [], {
+        title: "Product Hunt",
+        sourceURL: "https://www.producthunt.com/feed",
+      }),
+    ]);
+    const result = await callTool(CONNECTION, "scrape", {
+      url: "https://www.producthunt.com/feed",
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("Feed with 2 entries:");
+    expect(result.text).toContain("- Tabbit AI |");
+    expect(result.text).not.toContain("<entry>");
+  });
+});
+
+describe("search_web", () => {
+  test("posts the query with a bounded limit and lists the web results", async () => {
+    const recorded = install([
+      {
+        body: {
+          success: true,
+          data: {
+            web: [
+              {
+                url: "https://alterable.com/",
+                title: "Alterable",
+                description:
+                  "Personalized email images, rendered at open time.",
+              },
+              { url: "https://madewithvuejs.com/alterable" },
+            ],
+            news: [{ url: "https://news.test/ignored" }],
+          },
+        },
+      },
+    ]);
+    const result = await callTool(CONNECTION, "search_web", {
+      query: "Alterable personalized email images",
+      limit: 50,
+    });
+    expect(recorded[0]?.url).toBe(
+      "https://firecrawl.example.test:3002/v2/search",
+    );
+    expect(JSON.parse(recorded[0]?.init.body ?? "{}")).toEqual({
+      query: "Alterable personalized email images",
+      limit: 10,
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain(
+      '2 results for "Alterable personalized email images":',
+    );
+    expect(result.text).toContain("- https://alterable.com/ — Alterable");
+    expect(result.text).toContain("Personalized email images");
+    expect(result.text).not.toContain("news.test");
+  });
+
+  test("requires a query and refuses a very long one before the vault is read", async () => {
+    let read = 0;
+    useFirecrawl({
+      config: CONFIG,
+      credential: async () => {
+        read += 1;
+        return API_KEY;
+      },
+      fetch: async () => {
+        throw new Error("nothing should be fetched");
+      },
+    });
+    expect((await callTool(CONNECTION, "search_web", {})).text).toContain(
+      "`query` is required",
+    );
+    expect(
+      (await callTool(CONNECTION, "search_web", { query: "x".repeat(301) }))
+        .text,
+    ).toContain("too long");
+    expect(read).toBe(0);
+  });
+
+  test("says when nothing was found", async () => {
+    install([{ body: { success: true, data: { web: [] } } }]);
+    const result = await callTool(CONNECTION, "search_web", {
+      query: "zzqx",
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("found nothing");
   });
 });
 

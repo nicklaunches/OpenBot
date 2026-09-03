@@ -51,9 +51,9 @@ the public store and failing every call at the wrong end.
 The repository ships `certs/firecrawl-ca.crt` for the instance nicklaunches.com uses; a deployment
 with its own instance points the variable at its own CA.
 
-## The three tools
+## The four tools
 
-Every tool takes a `url`, and every `url` is checked before anything else happens: it has to be a web
+Three tools take a `url`, and every `url` is checked before anything else happens: it has to be a web
 address on a public host. An address on a private network, at `localhost`, or at a cloud metadata
 endpoint is refused before the key is read, by the same rule the Bot's own browser applies to a
 navigation. The instance fetches from wherever it runs, and what it can reach on its own network is
@@ -61,9 +61,10 @@ not a thing a model gets to name.
 
 | Tool            | Reads                                                                                                                                                                                                                                       |
 | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `scrape`        | One page as markdown, with its title, description and links. `only_main_content` (default true) strips navigation and footers; `max_chars` (default 12 000) bounds the text and the answer says when it was cut.                          |
+| `scrape`        | One page as markdown, with its title, description and links. `only_main_content` (default true) strips navigation and footers; `max_chars` (default 12 000) bounds the text and the answer says when it was cut. An Atom or RSS feed comes back as one line per entry, which is how a directory that blocks automated reads of its pages (Product Hunt does) is still read. |
 | `map_site`      | The addresses a site has, ranked by an optional `search` term such as `contact` or `pricing`. Up to 200. The right first call on an unfamiliar site, because it reads link structure rather than pages.                                    |
 | `find_contacts` | A composite: reads the home page, follows the about, team, contact and pricing pages it finds, up to `max_pages` (default 4), and returns emails, X, LinkedIn and GitHub profiles, contact forms and the pricing page as JSON. One call per product. |
+| `search_web`    | A web search through the instance's own search backend, up to 10 results with a title and snippet each. How a product's own site is found when a directory gave only its name and tagline.                                              |
 
 Every answer is capped at the same visible limit the vendor transports use, and every answer and
 every failure is scrubbed of the key before a model reads it.
@@ -73,7 +74,7 @@ every failure is scrubbed of the key before a model reads it.
 Enabling the connector does not give any Bot access to it. Each tool is granted per Bot at
 `/admin/plugins/firecrawl`, exactly as a Google Drive or Notion tool would be. Every call then checks
 the grant, evaluates the action policy, and writes an audit row recording that the access was the
-deployment's rather than the asker's. All three tools classify as reads; a policy that wants to bound
+deployment's rather than the asker's. All four tools classify as reads; a policy that wants to bound
 where a Bot may read from does so on the tool's name, since rules see a call's name and effect rather
 than its arguments.
 

@@ -7,7 +7,9 @@ import {
   mapSite,
   redacted,
   type ScrapedPage,
+  type SearchHit,
   scrape,
+  searchWeb,
 } from "../firecrawl/client";
 import { MAX_RESULT_CHARS, type McpCallResult, type McpTool } from "./mcp";
 
@@ -115,6 +117,12 @@ const MAX_LISTED_LINKS = 80;
 /** Bounds on how many addresses one `map_site` call returns. */
 const MAP_LIMIT = { fallback: 50, max: 200 } as const;
 
+/** Bounds on how many results one `search_web` call returns. */
+const SEARCH_LIMIT = { fallback: 5, max: 10 } as const;
+
+/** How many feed entries a `scrape` of an Atom or RSS feed lists. */
+const MAX_FEED_ENTRIES = 60;
+
 /** Bounds on how many pages `find_contacts` reads for one site. */
 const CONTACT_PAGES = { fallback: 4, max: 8 } as const;
 
@@ -135,7 +143,9 @@ const TOOLS: readonly McpTool[] = Object.freeze([
       "",
       "Every call renders the page fresh and takes a few seconds, so read the page you need rather",
       "than every page you could. The links come back separately from the text, so a directory page",
-      "gives you both what launched and where each entry leads.",
+      "gives you both what launched and where each entry leads. An Atom or RSS feed comes back as",
+      "one line per entry (title, summary, author, date, link), which is how a directory that",
+      "refuses automated reads of its pages, such as Product Hunt, is still read: scrape its feed.",
     ].join("\n"),
     inputSchema: {
       type: "object",
@@ -202,6 +212,31 @@ const TOOLS: readonly McpTool[] = Object.freeze([
         },
       },
       required: ["url"],
+    },
+  },
+  {
+    name: "search_web",
+    description: [
+      "Search the web through the deployment's Firecrawl instance and get back addresses with a",
+      "title and a snippet each. Use it to find a product's own website when a directory only gave",
+      "you its name and tagline, or to find the maker behind a name. Search for the product name",
+      "plus a distinctive word from its tagline, then scrape or find_contacts the address that is",
+      "clearly the product's own site rather than a directory, a review or a news page.",
+    ].join("\n"),
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description:
+            "What to search for. A product name plus one or two words from its tagline finds its site; a bare common word finds noise.",
+        },
+        limit: {
+          type: "integer",
+          description: `How many results to return at most. Default ${SEARCH_LIMIT.fallback}, at most ${SEARCH_LIMIT.max}.`,
+        },
+      },
+      required: ["query"],
     },
   },
 ]);
@@ -350,9 +385,20 @@ export async function callTool(
    * refused without a credential being decrypted or a request being made, so a model that named one
    * costs nothing and learns why.
    */
-  const chosen = selectUrl(args);
-  if (chosen.error || !chosen.url) {
-    return failure(chosen.error ?? "`url` is required.");
+  let subject: string;
+  if (toolName === "search_web") {
+    const query = stringArg(args, "query");
+    if (!query) return failure("`query` is required: what to search for.");
+    if (query.length > 300) {
+      return failure("`query` is too long: keep it under 300 characters.");
+    }
+    subject = query;
+  } else {
+    const chosen = selectUrl(args);
+    if (chosen.error || !chosen.url) {
+      return failure(chosen.error ?? "`url` is required.");
+    }
+    subject = chosen.url;
   }
 
   let apiKey: string | null = null;
@@ -366,7 +412,7 @@ export async function callTool(
       apiKey,
       ...(access.config.ca ? { ca: access.config.ca } : {}),
     };
-    const result = await runTool(http, instance, chosen.url, toolName, args);
+    const result = await runTool(http, instance, subject, toolName, args);
     // Every answer goes through the scrub, not only the failure path below.
     return { ...result, text: redacted(result.text, [apiKey]) };
   } catch (error) {
@@ -378,7 +424,7 @@ export async function callTool(
   }
 }
 
-/** The work itself, once the address and the key are settled. */
+/** The work itself, once the address (or, for `search_web`, the query) and the key are settled. */
 async function runTool(
   http: FetchLike,
   instance: { baseUrl: string; apiKey: string; ca?: string },
@@ -405,6 +451,14 @@ async function runTool(
         limit: bounded(limit.value, MAP_LIMIT),
       });
       return asResult(mapText(links, url));
+    }
+    case "search_web": {
+      const limit = integerArg(args, "limit", 1);
+      if (limit.error) return failure(limit.error);
+      const hits = await searchWeb(http, instance, url, {
+        limit: bounded(limit.value, SEARCH_LIMIT),
+      });
+      return asResult(searchText(hits, url));
     }
     case "find_contacts": {
       const pages = integerArg(args, "max_pages", 1);
@@ -441,6 +495,20 @@ export function pageText(
   lines.push("");
 
   const markdown = (page.markdown ?? "").trim();
+  const feed = feedEntries(markdown);
+  if (feed) {
+    /*
+     * A feed, rendered as its entries. Product Hunt, and most directories, refuse automated reads
+     * of their HTML and still publish an Atom or RSS feed of the same launches, so a scrape of the
+     * feed address is how a directory is actually read; 40 KB of XML is not what a model should
+     * be handed for that.
+     */
+    lines.push(
+      `Feed with ${feed.length} entries${feed.length > MAX_FEED_ENTRIES ? `, first ${MAX_FEED_ENTRIES} shown` : ""}:`,
+    );
+    for (const entry of feed.slice(0, MAX_FEED_ENTRIES)) lines.push(entry);
+    return lines.join("\n");
+  }
   if (!markdown) {
     lines.push("(The page rendered with no readable text.)");
   } else if (markdown.length > maxChars) {
@@ -463,6 +531,127 @@ export function pageText(
       lines.push(`- ${link}`);
   }
   return lines.join("\n");
+}
+
+function searchText(hits: SearchHit[], query: string): string {
+  if (hits.length === 0) {
+    return `The search for "${query}" found nothing. Try fewer or more distinctive words.`;
+  }
+  const lines = [`${hits.length} results for "${query}":`];
+  for (const hit of hits) {
+    lines.push(`- ${hit.url}${hit.title ? ` — ${hit.title}` : ""}`);
+    if (hit.description) lines.push(`  ${hit.description.slice(0, 240)}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * An Atom or RSS document as one line per entry, or null when the text is not a feed.
+ *
+ * Read with expressions rather than an XML parser, which this runtime does not ship for the
+ * server, over the four elements every feed has: a title, a link, a date and a body. The body is
+ * reduced to its text, since a feed's HTML is a paragraph and a pair of links a model does not
+ * need to see the markup of.
+ */
+export function feedEntries(text: string): string[] | null {
+  const head = text.slice(0, 2_000);
+  if (!/<(feed|rss)[\s>]/i.test(head)) return null;
+  const items = text.match(/<(entry|item)\b[^>]*>[\s\S]*?<\/\1>/gi) ?? [];
+  if (items.length === 0) return null;
+
+  const entries: string[] = [];
+  for (const item of items) {
+    const title = textOf(item, "title");
+    const link =
+      attributeOf(item, "link", "href", ["alternate", null]) ??
+      textOf(item, "link") ??
+      textOf(item, "guid");
+    const published =
+      textOf(item, "published") ??
+      textOf(item, "pubDate") ??
+      textOf(item, "updated") ??
+      textOf(item, "dc:date");
+    const author = textOf(item, "name") ?? textOf(item, "dc:creator");
+    const body =
+      textOf(item, "content") ??
+      textOf(item, "summary") ??
+      textOf(item, "description");
+    const parts = [title ?? "(untitled)"];
+    if (body) parts.push(body.slice(0, 240));
+    if (author) parts.push(`by ${author}`);
+    if (published) parts.push(dayOf(published));
+    if (link) parts.push(link);
+    entries.push(`- ${parts.join(" | ")}`);
+  }
+  return entries;
+}
+
+/** A feed's date as a calendar day, whichever of the two spellings feeds use it arrived in. */
+function dayOf(published: string): string {
+  const parsed = new Date(published);
+  return Number.isNaN(parsed.getTime())
+    ? published.slice(0, 16)
+    : parsed.toISOString().slice(0, 10);
+}
+
+/** The text of the first `<tag>` in an element, entities decoded and markup removed. */
+function textOf(item: string, tag: string): string | null {
+  const match = new RegExp(
+    `<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`,
+    "i",
+  ).exec(item);
+  if (!match) return null;
+  const raw = (match[1] ?? "").replace(
+    /^\s*<!\[CDATA\[([\s\S]*?)\]\]>\s*$/,
+    "$1",
+  );
+  const text = stripMarkup(decodeEntities(raw));
+  return text || null;
+}
+
+/** An attribute of the first `<tag>` whose `rel` is one of the wanted values, in that order. */
+function attributeOf(
+  item: string,
+  tag: string,
+  attribute: string,
+  rels: readonly (string | null)[],
+): string | null {
+  const tags = item.match(new RegExp(`<${tag}\\b[^>]*>`, "gi")) ?? [];
+  for (const rel of rels) {
+    for (const found of tags) {
+      const relMatch = /\brel=["']([^"']*)["']/i.exec(found);
+      const actual = relMatch ? (relMatch[1] ?? "") : null;
+      if (actual !== rel) continue;
+      const value = new RegExp(`\\b${attribute}=["']([^"']*)["']`, "i").exec(
+        found,
+      );
+      if (value?.[1]) return decodeEntities(value[1]);
+    }
+  }
+  return null;
+}
+
+function decodeEntities(text: string): string {
+  return text
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_, code: string) =>
+      String.fromCodePoint(Number.parseInt(code, 10)),
+    )
+    .replace(/&amp;/g, "&");
+}
+
+/** Markup and the "Discussion | Link" footers feeds append, reduced to one line of text. */
+function stripMarkup(html: string): string {
+  return html
+    .replace(/<a\b[^>]*>(Discussion|Link|Comments?|Read more)<\/a>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\\_/g, "_")
+    .replace(/\s*\|\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function mapText(links: MappedLink[], url: string): string {
@@ -715,9 +904,16 @@ export function harvest(found: Contacts, page: ScrapedPage, url: string): void {
   for (const line of text.split("\n")) {
     const trimmed = line.replace(/[#*_>]/g, "").trim();
     if (trimmed.length < 8 || trimmed.length > 160) continue;
+    /*
+     * A line that says who made it, not a line that happens to contain "by". "Sell your art
+     * faster by showing it in real spaces" is a tagline; "Built by Jane Doe" and "Founder: Jane
+     * Doe" are hints, and so is a first-person "I built this" line, which is how a solo maker
+     * usually says it.
+     */
     if (
-      /\b(made|built|created|founded|founder|maker|by)\b/i.test(trimmed) &&
-      /\b(by|founder|maker)\b/i.test(trimmed) &&
+      /\b(made|built|created|founded|designed|developed|crafted)\s+by\b|\bfounders?\b(?!@)|\bmakers?\b(?!@)|\bco-?founder\b(?!@)|\b(i|we)\s+(built|made|created|founded)\b/i.test(
+        trimmed,
+      ) &&
       found.maker_hints.length < 5
     ) {
       addUnique(found.maker_hints, trimmed);

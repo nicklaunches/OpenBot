@@ -313,27 +313,31 @@ skills:
     title: Prospect a launch directory
     summary: Read a launch directory such as Product Hunt, pick the launches worth a Nick Launches lead, and check each against nicklaunches.com.
     instructions: >-
-      Read the directory with firecrawl scrape. For Product Hunt, scrape https://www.producthunt.com/
-      first; when the day's launches are not on it, scrape the daily leaderboard at
-      https://www.producthunt.com/leaderboard/daily/YYYY/M/D for today's date. From the listing,
-      take each product's name, tagline, upvotes and the link to its Product Hunt page. Judge fit from
-      the tagline before reading anything else, and only for the ones that look like a paid product or
-      SaaS from an indie maker or small team, scrape the product's Product Hunt page to get its own
-      website address; do not scrape every product. Skip anything that is clearly a large company's
-      release, a free tool with no business behind it, or a bare open-source repository, and say so in
-      one line each. For each remaining product, check nicklaunches.com: call search_products with
-      the product's name and, when nothing matches by name, judge by the website address; call
-      check_launch_readiness only for products that have already passed the fit and contact checks,
-      at most ten in one run, because that tool is rate limited. A product already listed is saved
-      with On Nick Launches set to Listed and Status set to Skipped, not dropped, so it is not read
-      again tomorrow. Before saving anything, search Notion for the product name and its website
-      address and skip what is already there. Then find a contact and save the lead with the other
-      two skills. Score fit from 0 to 100: paid or SaaS, indie or small team, contact found, and not
-      listed each count, and a tagline that names a business problem counts more than one that
-      names a hobby. Finish with a short report: how many launches you read, which you saved with
-      their fit scores, and which you skipped and why.
+      Read the directory with firecrawl scrape. Product Hunt refuses automated reads of its pages,
+      so never scrape its HTML pages or its /r/ redirect links; scrape its feed at
+      https://www.producthunt.com/feed instead, which comes back as one line per launch with the
+      name, the tagline, the hunter, the date and the Product Hunt page. Keep the launches published
+      today, or in the last day when today's are few. Judge fit from the tagline first, and only for
+      the ones that look like a paid product or SaaS from an indie maker or small team go further; do
+      not investigate every entry. Skip anything that is clearly a large company's release, a free
+      tool with no business behind it, or a bare open-source repository, and say so in one line each.
+      To find a product's own website, call search_web with the product name plus one or two
+      distinctive words from its tagline and pick the result that is clearly the product's own site,
+      not a directory, review or news page; when no result is clearly it, say so and skip the
+      product rather than guessing. For each remaining product, check nicklaunches.com: call
+      search_products with the product's name and, when nothing matches by name, judge by the
+      website address; call check_launch_readiness only for products that have already passed the
+      fit and contact checks, at most ten in one run, because that tool is rate limited. A product
+      already listed is saved with On Nick Launches set to Listed and Status set to Skipped, not
+      dropped, so it is not read again tomorrow. Before saving anything, search Notion for the
+      product name and its website address and skip what is already there. Then find a contact and
+      save the lead with the other two skills. Score fit from 0 to 100: paid or SaaS, indie or small
+      team, contact found, and not listed each count, and a tagline that names a business problem
+      counts more than one that names a hobby. Finish with a short report: how many launches you
+      read, which you saved with their fit scores, and which you skipped and why.
     tools:
       - firecrawl/scrape
+      - firecrawl/search_web
       - firecrawl/map_site
       - nicklaunches/search_products
       - nicklaunches/get_product
@@ -352,9 +356,12 @@ skills:
       to settle whether the product is paid, freemium or free, and the maker hints to settle whether
       it is a solo maker, a small team or a company. When it returns nothing, call map_site with the
       search term contact and scrape the one page that looks right; when that finds nothing either,
-      the product has no reachable contact, and you say so rather than inventing an address.
+      the product has no reachable contact, and you say so rather than inventing an address. When
+      you do not yet have the product's own website, call search_web with its name and a word from
+      its tagline first, and only then find_contacts on the address that is clearly the product's.
     tools:
       - firecrawl/find_contacts
+      - firecrawl/search_web
       - firecrawl/map_site
       - firecrawl/scrape
 

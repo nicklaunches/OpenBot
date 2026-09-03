@@ -178,6 +178,57 @@ export async function mapSite(
   return links;
 }
 
+/** One web search result, in the parts a model needs to decide whether to open it. */
+export type SearchHit = {
+  url: string;
+  title?: string;
+  description?: string;
+};
+
+export type SearchOptions = {
+  /** How many results to return at most. */
+  limit?: number;
+};
+
+/**
+ * A web search through the instance's own search backend.
+ *
+ * A self-hosted Firecrawl searches through whatever engine it was given (SearXNG, usually), so the
+ * results are that engine's. Only the `web` results are read; an instance that also answers with
+ * news or images is answering a question nobody here asked.
+ */
+export async function searchWeb(
+  http: FetchLike,
+  access: FirecrawlAccess,
+  query: string,
+  options: SearchOptions = {},
+): Promise<SearchHit[]> {
+  const body = await post(http, access, "/v2/search", {
+    query,
+    ...(options.limit ? { limit: options.limit } : {}),
+  });
+  const data = (body as { data?: unknown }).data;
+  const raw =
+    data && typeof data === "object" && "web" in data
+      ? (data as { web?: unknown }).web
+      : data;
+  if (!Array.isArray(raw)) return [];
+  const hits: SearchHit[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const entry = item as Partial<SearchHit>;
+    if (typeof entry.url !== "string") continue;
+    hits.push({
+      url: entry.url,
+      ...(typeof entry.title === "string" ? { title: entry.title } : {}),
+      ...(typeof entry.description === "string"
+        ? { description: entry.description }
+        : {}),
+    });
+  }
+  return hits;
+}
+
 /**
  * One POST to the instance, with the deadline, the key and the CA attached.
  *
