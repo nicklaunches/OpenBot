@@ -25,12 +25,27 @@ import { textOf } from "../agents/message-text";
  * case here resolves towards offering more rather than less.
  */
 
-/** One granted skill, as much of it as choosing needs. */
+/** One granted skill, as much of it as choosing between them and then following one needs. */
 export type SelectableSkill = {
   slug: string;
   title: string;
-  /** The one line the model reads. This is the index; see K3. */
+  /** The one line the model reads when CHOOSING. This is the index; see K3. */
   summary: string;
+  /**
+   * The procedure itself, for the run that follows the choosing.
+   *
+   * NOT read by pass one, which sees `summary` and nothing else: the whole point of an index is that
+   * it is short, and pasting every procedure into the selection prompt would make choosing cost more
+   * than the choice saves. It is carried here anyway because the same load answers both questions and
+   * a second read of the same rows to fetch one column is a query nobody needs.
+   *
+   * This field was missing, and its absence was the expensive kind of silent. A skill's instructions
+   * were written, stored, synced from the tenant package and shown in the UI, and then dropped in
+   * `grantedSkills` before any run ever saw them: skills narrowed which tools were offered and told
+   * the model nothing about how to use them. A skill that said "this site refuses automated reads,
+   * use its feed instead" was, to the model, a title and a one-line summary.
+   */
+  instructions: string;
   /** What the skill says it needs, as `<serverId>/<toolName>` refs. A declaration, not a grant. */
   tools: readonly string[];
 };

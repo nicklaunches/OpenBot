@@ -57,12 +57,14 @@ const skills = [
     slug: "drive-audit",
     title: "Drive audit",
     summary: "Read documents out of Google Drive.",
+    instructions: "Read the shared drive before the personal one.",
     tools: ["drive/tool_0", "drive/tool_1"],
   },
   {
     slug: "slack-digest",
     title: "Slack digest",
     summary: "Summarise Slack channels.",
+    instructions: "Quote nobody by name in a digest.",
     // Every Slack tool, so a Slack tool being offered can only mean this skill was chosen.
     tools: Array.from({ length: 8 }, (_, index) => `slack/tool_${index}`),
   },
@@ -474,6 +476,7 @@ describe("when selection cannot help", () => {
             slug: "prose",
             title: "Prose",
             summary: "Instructions only",
+            instructions: "Answer in prose, and call nothing.",
             tools: [],
           },
         ],

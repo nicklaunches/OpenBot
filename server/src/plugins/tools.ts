@@ -227,6 +227,9 @@ export async function grantedSkills(options: {
     slug: skill.slug,
     title: skill.title,
     summary: skill.summary,
+    // Carried, not dropped. This used to stop here, and the procedure a person wrote never reached
+    // any model on any run; see the note on `SelectableSkill.instructions`.
+    instructions: skill.instructions,
     tools: skill.tools,
   }));
 }

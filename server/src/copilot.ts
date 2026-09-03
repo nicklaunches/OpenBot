@@ -1,4 +1,5 @@
 import type { BaseEvent, RunAgentInput } from "@ag-ui/client";
+import { EventType } from "@ag-ui/client";
 import { AbstractAgent, HttpAgent } from "@ag-ui/client";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { BuiltInAgentConfiguration } from "@copilotkit/runtime/v2";
@@ -9,7 +10,7 @@ import {
 } from "@copilotkit/runtime/v2";
 import { createCopilotHonoHandler } from "@copilotkit/runtime/v2/hono";
 import type { Observable } from "rxjs";
-import { defer, from, switchMap } from "rxjs";
+import { defer, from, Observable as ObservableCtor, switchMap } from "rxjs";
 import { z } from "zod";
 import {
   COMPUTER_GUIDANCE,
@@ -258,6 +259,45 @@ export function standingInstructionsGuidance(
   ].join("\n\n");
 }
 
+/**
+ * The procedures a Bot holds, as the model is told them.
+ *
+ * The third instruction carrier named in the comment on {@link standingInstructionsGuidance}, and
+ * until now the only one that was never delivered. A role is the coworker's and reads the same to
+ * everybody; standing instructions are the person's and true of every task; a skill is a procedure
+ * for one KIND of task, and it is where a deployment writes down what it has learned the hard way —
+ * that a site refuses automated reads, that a tool is rate limited, which database id is the real
+ * one. All of that was being stored and discarded.
+ *
+ * WHAT IS PASSED IN DECIDES WHICH ONES ARE HERE, and the caller passes every skill the Bot holds
+ * whenever narrowing did not run or did not choose. That is deliberate and it is the same asymmetry
+ * `selection.ts` argues for: a skill included needlessly costs a paragraph of context, and a skill
+ * left out costs the run, because the model does the thing the procedure existed to prevent and
+ * nothing downstream can tell it did. Under the selection floor there is no choosing at all, which
+ * is exactly where the failure that prompted this was found.
+ *
+ * A skill with no instructions is left out rather than rendered as an empty heading: a heading with
+ * nothing under it reads as a procedure the model has forgotten, and it will say so.
+ */
+export function skillGuidance(
+  skills: readonly SelectableSkill[],
+): string | null {
+  const written = skills.filter(
+    (skill) => skill.instructions.trim().length > 0,
+  );
+  if (written.length === 0) return null;
+
+  return [
+    "You have been given the skills below. Each is a procedure for one kind of task, written by " +
+      "the people who run this deployment. When the work in front of you is what a skill is for, " +
+      "follow it, and where it says something about a system, a site or a tool that you would " +
+      "otherwise have guessed at, it is what this deployment has learned and it is right.",
+    ...written.map(
+      (skill) => `## ${skill.title}\n\n${skill.instructions.trim()}`,
+    ),
+  ].join("\n\n");
+}
+
 export function builtInAgentConfiguration(
   agent: RegisteredBuiltInAgent,
   model: RuntimeModel,
@@ -292,6 +332,14 @@ export function builtInAgentConfiguration(
    * none, which is most people on most days and costs the prompt nothing.
    */
   standingInstructions?: string | null,
+  /**
+   * The skills this run should follow, already narrowed if this deployment narrows.
+   *
+   * Empty means the Bot holds none, which is most Bots. It is NOT a signal that narrowing chose
+   * nothing: a run that chose nothing is given every skill the Bot holds, for the reason set out on
+   * {@link skillGuidance}.
+   */
+  skills: readonly SelectableSkill[] = [],
 ): BuiltInAgentConfiguration {
   if (!apiKey) {
     return {
@@ -306,6 +354,7 @@ export function builtInAgentConfiguration(
   }
 
   const standing = standingInstructionsGuidance(standingInstructions);
+  const procedures = skillGuidance(skills);
 
   return {
     model: builtInAgentModel(model, apiKey),
@@ -324,6 +373,20 @@ export function builtInAgentConfiguration(
     prompt: [
       agent.systemPrompt,
       ...(standing ? [standing] : []),
+      /*
+       * The procedures, with the two standing instructions and above everything generated.
+       *
+       * Here because this is instruction content and the blocks below are not: provenance is how to
+       * answer at all, the holdings are an inventory, and the computer prose is what its hands are.
+       * A procedure read after an inventory is a procedure the model has already decided how to
+       * work around, and the one that prompted this fix said in as many words not to do the thing
+       * the Bot spent three of its eight steps doing.
+       *
+       * Below the role and the person, though, and not above them: a skill says how one task is
+       * done, and it does not get to redefine what the coworker is for or how this person wants to
+       * be worked with.
+       */
+      ...(procedures ? [procedures] : []),
       /*
        * Unconditional, unlike the two below it.
        *
@@ -466,6 +529,18 @@ async function buildAgent(
   const granted = await loadTools(agent.id);
 
   /*
+   * The skills this Bot holds, read whether or not anything is going to be narrowed.
+   *
+   * Read through `selection` because that is where the loader lives, but WANTED INDEPENDENTLY OF IT:
+   * a skill is a procedure the model is told (see `skillGuidance`) as well as an index narrowing
+   * chooses from, and the Bot that prompted this fix holds exactly twelve tools — one under the
+   * floor — so narrowing never ran for it and, when instructions were delivered only through the
+   * narrowing path, it was told none of its three procedures on any run it ever did.
+   */
+  const skills = selection
+    ? await selection.loadSkills(agent.id).catch(() => [])
+    : [];
+  /*
    * Whether narrowing can do anything here at all.
    *
    * A skill that declares no tools is not a unit of retrieval, and a catalogue already small enough
@@ -473,9 +548,6 @@ async function buildAgent(
    * of this existed: no deferral, no per-run model call, nothing to go wrong. That is most
    * deployments on their first day, and they should not pay for a feature they are not using.
    */
-  const skills = selection
-    ? await selection.loadSkills(agent.id).catch(() => [])
-    : [];
   const narrowing =
     selection &&
     skills.some((skill) => skill.tools.length > 0) &&
@@ -483,9 +555,22 @@ async function buildAgent(
       ? selection
       : undefined;
 
-  /** Pass one and pass two, for one run. Shared by both agent kinds; each applies it differently. */
-  const offeredFor = async (input: RunAgentInput): Promise<GrantedTool[]> => {
-    if (!narrowing) return granted;
+  /**
+   * Pass one and pass two, for one run: what to offer, and which procedures to state.
+   *
+   * The two travel together because one decision settles both. When pass one names skills, the offer
+   * is their tools and the procedures are theirs; when it names none, could not answer, or never ran,
+   * everything stays offered and every procedure is stated. Splitting them would let a run be handed
+   * a skill's tools without its instructions, which is the failure this whole change is about, only
+   * narrower and harder to see.
+   */
+  const forRun = async (
+    input: RunAgentInput,
+  ): Promise<{
+    offered: GrantedTool[];
+    skills: readonly SelectableSkill[];
+  }> => {
+    if (!narrowing) return { offered: granted, skills };
     const chosen = await selectTools({
       tools: granted,
       skills,
@@ -496,8 +581,23 @@ async function buildAgent(
     // Awaited, so the row is on record before the model is handed the tools it names. A discovery
     // written afterwards would sit in the trail after the calls it explains.
     await narrowing.record?.(agent.id, chosen).catch(() => {});
-    return chosen.offered;
+    return {
+      offered: chosen.offered,
+      /*
+       * Only a real choice narrows the procedures. Every other reason — pass one unavailable, pass
+       * one naming nothing, a catalogue under the floor — leaves the offer whole, and a whole offer
+       * with narrowed procedures would be a run holding tools it had not been told how to use.
+       */
+      skills:
+        chosen.reason === "selected"
+          ? skills.filter((skill) => chosen.skills.includes(skill.slug))
+          : skills,
+    };
   };
+
+  /** The same decision, for the remote path, which takes tools and is told no procedures. */
+  const offeredFor = async (input: RunAgentInput): Promise<GrantedTool[]> =>
+    (await forRun(input)).offered;
 
   if (agent.type === "remote_ag_ui") {
     /*
@@ -540,7 +640,10 @@ async function buildAgent(
    * the message is known. The guidance it is given is generated from the tools passed here, which is
    * what keeps a narrowed run from being told it holds something it was not offered.
    */
-  const withTools = (tools: GrantedTool[]) =>
+  const withTools = (
+    tools: GrantedTool[],
+    procedures: readonly SelectableSkill[] = skills,
+  ) =>
     new BuiltInAgentWithSaneHistory(
       builtInAgentConfiguration(
         agent,
@@ -550,7 +653,14 @@ async function buildAgent(
         computerGuidance,
         connectedVendors,
         standingInstructions,
+        procedures,
       ),
+      /*
+       * Only a Bot with tools can run out of turn. `builtInAgentConfiguration` sets the cap only
+       * when there are tools to spend it on, so the two conditions are the same one, written here
+       * against the same `tools` it is written against there.
+       */
+      tools.length > 0 ? ranOutOfTurnSentence(agent.name, TOOL_STEPS) : null,
     );
 
   const whole = withTools(granted);
@@ -560,7 +670,9 @@ async function buildAgent(
     { agentId: agent.id, description: agent.name },
     whole,
     async (input) => {
-      const offered = narrowing ? await offeredFor(input) : granted;
+      const { offered, skills: procedures } = narrowing
+        ? await forRun(input)
+        : { offered: granted, skills };
       /*
        * The tool for handing work to another Bot is made per run, not per request.
        *
@@ -571,11 +683,20 @@ async function buildAgent(
        */
       const passing = (await handoff?.(agent.id, input)) ?? [];
       const tools = passing.length > 0 ? [...offered, ...passing] : offered;
-      // Nothing added and nothing narrowed means nothing to rebuild, and reusing the agent already
-      // built for this request keeps that path allocation-for-allocation what it was.
-      return tools.length === granted.length && passing.length === 0
+      /*
+       * Nothing added and nothing narrowed means nothing to rebuild, and reusing the agent already
+       * built for this request keeps that path allocation-for-allocation what it was.
+       *
+       * THE PROCEDURES ARE PART OF "NOTHING NARROWED". `whole` carries every skill the Bot holds, so
+       * a run whose tools happened to come back whole while its procedures were narrowed would be
+       * handed the wrong prompt by this shortcut — silently, and only on the runs where pass one
+       * chose every tool but not every skill.
+       */
+      return tools.length === granted.length &&
+        passing.length === 0 &&
+        procedures.length === skills.length
         ? whole
-        : withTools(tools);
+        : withTools(tools, procedures);
     },
   );
 }
@@ -825,26 +946,134 @@ function remoteAgentWithStandingRole(
  * survive this pass or the appended result lands on nothing.
  */
 
+/**
+ * Events that are the Bot speaking to the person, and events that are it working.
+ *
+ * Reasoning is deliberately in NEITHER. A model that thinks and then calls a tool and then stops has
+ * still told the person nothing, and counting a reasoning block as an answer would hide exactly the
+ * runs this is here to catch. Thinking is not an answer.
+ */
+const SPEAKING: ReadonlySet<string> = new Set([
+  EventType.TEXT_MESSAGE_START,
+  EventType.TEXT_MESSAGE_CONTENT,
+  EventType.TEXT_MESSAGE_END,
+  EventType.TEXT_MESSAGE_CHUNK,
+]);
+
+const WORKING: ReadonlySet<string> = new Set([
+  EventType.TOOL_CALL_START,
+  EventType.TOOL_CALL_ARGS,
+  EventType.TOOL_CALL_END,
+  EventType.TOOL_CALL_CHUNK,
+  EventType.TOOL_CALL_RESULT,
+]);
+
+/**
+ * Say so when a turn ends on tool results with the model never having spoken again.
+ *
+ * FOUND LIVE. A prospecting Bot spent eight steps reading the web, hit `stopWhen: stepCountIs(8)`
+ * mid-investigation, and the run ended normally — RUN_FINISHED, no error, nothing said. The composer
+ * unlocked, the spinner stopped, and the transcript simply stopped after a tool result. From the
+ * person's side that is indistinguishable from the Bot hanging, and it is the same hole
+ * `channels/stall-guard.ts` was written to close for a Bot that goes silent on the wire. This closes
+ * the other half: a Bot that runs out of turn.
+ *
+ * DETECTED FROM THE SHAPE OF THE STREAM, because there is nothing better to detect it from. The AI
+ * SDK's step cap is `stopWhen`, which stops the loop and reports no reason of its own; the runtime
+ * emits no STEP_FINISHED, and `finishReason` never reaches here. What is observable, and what is
+ * true of every one of these runs, is that the last thing the Bot did was use a tool. A run that
+ * ends with the model speaking is a run that answered, whatever it did before that.
+ *
+ * THE SENTENCE SAYS WHAT WAS SEEN, NOT WHAT IT CONCLUDES. The cap is stated as a fact about a turn
+ * rather than as a diagnosis of this one, because a turn can also end this way if a model simply
+ * stops emitting after a tool call, and telling somebody the wrong cause is worse than telling them
+ * the symptom. The wording follows `stalledEvent`: name the Bot, say what happened, say the turn is
+ * over, say what to do next.
+ *
+ * RUN_ERROR, ahead of the RUN_FINISHED it explains, and the RUN_FINISHED still goes through. That is
+ * the event both surfaces already draw (`app/src/lib/copilot/stopped-turn.ts` keeps its message and
+ * renders it), so nothing downstream had to learn a new one, and the run's own bookkeeping is left
+ * exactly as it was: this adds a sentence, it does not fail a turn that succeeded.
+ */
+export function sayingSoIfItNeverAnswered(
+  events: Observable<BaseEvent>,
+  sentence: string,
+): Observable<BaseEvent> {
+  return new ObservableCtor<BaseEvent>((subscriber) => {
+    /*
+     * Starts true, so a run that emits no content at all is left alone. That run is a different
+     * failure — a Bot that said nothing whatsoever — and it already has its own reporting. This is
+     * only ever about a turn that did work and then stopped short of describing it.
+     */
+    let spokeLast = true;
+    return events.subscribe({
+      next: (event) => {
+        if (SPEAKING.has(event.type)) spokeLast = true;
+        else if (WORKING.has(event.type)) spokeLast = false;
+
+        if (event.type === EventType.RUN_FINISHED && !spokeLast) {
+          subscriber.next({
+            type: EventType.RUN_ERROR,
+            message: sentence,
+            code: "AGENT_STEP_LIMIT_REACHED",
+          } as unknown as BaseEvent);
+        }
+        subscriber.next(event);
+      },
+      error: (error) => subscriber.error(error),
+      complete: () => subscriber.complete(),
+    });
+  });
+}
+
+/**
+ * What a person is told when a turn ran out before it answered.
+ *
+ * Built where the Bot and the cap are both in scope, and passed in, so the wrapper below stays a
+ * thing that watches a stream rather than a thing that knows what a Bot is called.
+ */
+export function ranOutOfTurnSentence(botName: string, steps: number): string {
+  return (
+    `${botName} used its tools but the turn ended before it said what it found. ` +
+    `One turn is capped at ${steps} steps of tool use. Ask it to carry on and it will ` +
+    "pick up from what it already has."
+  );
+}
+
 class BuiltInAgentWithSaneHistory extends BuiltInAgent {
   /**
    * The configuration, held a second time because the base class keeps its own copy private and
    * {@link clone} has to build another one of THIS class rather than of the base.
    */
   private readonly configuration: BuiltInAgentConfiguration;
+  /**
+   * What to say if this Bot runs out of turn, or null when it cannot.
+   *
+   * Null for a Bot with no tools: there is no step loop to exhaust and no tool result to end on, so
+   * watching for one would be watching for something that cannot happen.
+   */
+  private readonly ranOutOfTurn: string | null;
 
-  constructor(configuration: BuiltInAgentConfiguration) {
+  constructor(
+    configuration: BuiltInAgentConfiguration,
+    ranOutOfTurn: string | null = null,
+  ) {
     super(configuration);
     this.configuration = configuration;
+    this.ranOutOfTurn = ranOutOfTurn;
   }
 
   run(input: RunAgentInput): Observable<BaseEvent> {
     const answeredByResume = new Set(
       (input.resume ?? []).map((entry) => entry.interruptId),
     );
-    return super.run({
+    const events = super.run({
       ...input,
       messages: sanitizeSeededHistory(input.messages, answeredByResume),
     });
+    return this.ranOutOfTurn
+      ? sayingSoIfItNeverAnswered(events, this.ranOutOfTurn)
+      : events;
   }
 
   /**
@@ -858,7 +1087,10 @@ class BuiltInAgentWithSaneHistory extends BuiltInAgent {
    * something does, it is not lost in a clone.
    */
   clone(): BuiltInAgentWithSaneHistory {
-    const cloned = new BuiltInAgentWithSaneHistory(this.configuration);
+    const cloned = new BuiltInAgentWithSaneHistory(
+      this.configuration,
+      this.ranOutOfTurn,
+    );
     type WithMiddlewares = { middlewares: unknown[] };
     (cloned as unknown as WithMiddlewares).middlewares = [
       ...(this as unknown as WithMiddlewares).middlewares,

@@ -2,14 +2,17 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { RunAgentInput } from "@ag-ui/client";
 import { HttpAgent } from "@ag-ui/client";
 import { BuiltInAgent } from "@copilotkit/runtime/v2";
-import { EMPTY } from "rxjs";
+import { EMPTY, from } from "rxjs";
 import { PROVENANCE_GUIDANCE } from "../../shared/bot-prompt";
 import {
   buildAgents,
   builtInAgentConfiguration,
   createRequestAgents,
+  ranOutOfTurnSentence,
   registeredAgentFromRow,
   resolveRuntimeAgents,
+  sayingSoIfItNeverAnswered,
+  skillGuidance,
   standingRoleMessage,
 } from "../src/copilot";
 import { grantedToolGuidance } from "../src/plugins/tools";
@@ -1237,6 +1240,7 @@ describe("a chat turn is not sent a conversation the model API refuses", () => {
             slug: "drive-audit",
             title: "Drive audit",
             summary: "Read documents out of Google Drive.",
+            instructions: "Read the shared drive before the personal one.",
             tools: ["drive/tool_0"],
           },
         ],
@@ -1259,5 +1263,187 @@ describe("a chat turn is not sent a conversation the model API refuses", () => {
 
     expect(seen[0]?.messages).toHaveLength(3);
     expect(seen[0]?.messages?.[1]).not.toHaveProperty("toolCalls");
+  });
+});
+
+describe("the procedures a Bot is told", () => {
+  const assistant = {
+    id: "general-assistant",
+    name: "General Assistant",
+    type: "built_in" as const,
+    systemPrompt: "Be helpful.",
+  };
+  const model = { provider: "openai" as const, defaultModel: "gpt-5.6-terra" };
+
+  const driveAudit = {
+    slug: "drive-audit",
+    title: "Drive audit",
+    summary: "Read documents out of Google Drive.",
+    instructions: "Read the shared drive before the personal one.",
+    tools: ["drive/tool_0"],
+  };
+
+  test("states each held skill's procedure, under its title", () => {
+    const stated = skillGuidance([driveAudit]) ?? "";
+
+    expect(stated).toContain("## Drive audit");
+    expect(stated).toContain("Read the shared drive before the personal one.");
+  });
+
+  test("says nothing at all when no skill has written anything", () => {
+    expect(skillGuidance([])).toBeNull();
+    /*
+     * A blank procedure is left out rather than rendered as an empty heading. A heading with nothing
+     * under it reads as a procedure the model has forgotten, and it will say so to the person.
+     */
+    expect(skillGuidance([{ ...driveAudit, instructions: "   " }])).toBeNull();
+  });
+
+  test("sits below the role and the person, and above everything generated", () => {
+    const prompt = builtInAgentConfiguration(
+      assistant,
+      model,
+      "openai-secret",
+      [{ name: "mcp__drive__tool_0" }] as never[],
+      "Computer guidance.",
+      [],
+      "Write in British English.",
+      [driveAudit],
+    ).prompt as string;
+
+    const role = prompt.indexOf("Be helpful.");
+    const person = prompt.indexOf("Write in British English.");
+    const procedure = prompt.indexOf("## Drive audit");
+    const provenance = prompt.indexOf(PROVENANCE_GUIDANCE);
+    const computer = prompt.indexOf("Computer guidance.");
+
+    expect(role).toBeLessThan(person);
+    expect(person).toBeLessThan(procedure);
+    /*
+     * Above the generated blocks on purpose. A procedure read after an inventory of tools is a
+     * procedure the model has already decided how to work around, and the one that prompted this
+     * said in as many words not to do the thing the Bot then spent most of its turn doing.
+     */
+    expect(procedure).toBeLessThan(provenance);
+    expect(procedure).toBeLessThan(computer);
+  });
+
+  /*
+   * THE REGRESSION, and it is worth naming exactly. Skill instructions used to reach a run only
+   * through the narrowing path, and narrowing runs only above the selection floor. A Bot at or under
+   * the floor was therefore told none of its procedures on any run it ever did — silently, and
+   * precisely because it was a small, well-scoped Bot. Twelve tools against the floor of twelve is
+   * the case that was found in production.
+   */
+  test("a Bot under the selection floor is still told its procedures", async () => {
+    const granted = Array.from({ length: 12 }, (_, index) => ({
+      ref: `drive/tool_${index}`,
+      name: `mcp__drive__tool_${index}`,
+      description: `drive tool ${index}`,
+    })) as never[];
+
+    const agents = await buildAgents(
+      [assistant],
+      model,
+      "openai-secret",
+      undefined,
+      async () => granted,
+      undefined,
+      undefined,
+      undefined,
+      {
+        loadSkills: async () => [driveAudit],
+        // Never called: twelve tools is not more than a floor of twelve, so nothing narrows.
+        choose: async () => {
+          throw new Error("selection must not run under the floor");
+        },
+      },
+    );
+
+    type WithConfiguration = { configuration: { prompt: string } };
+    const prompt = (agents[assistant.id] as unknown as WithConfiguration)
+      .configuration.prompt;
+
+    expect(prompt).toContain("Read the shared drive before the personal one.");
+  });
+});
+
+describe("a turn that ran out before it answered", () => {
+  const event = (type: string) => ({ type }) as never;
+  const collect = (types: string[]) => {
+    const seen: { type: string; message?: string }[] = [];
+    sayingSoIfItNeverAnswered(
+      from(types.map(event)),
+      "Scout ran out of turn.",
+    ).subscribe((emitted) => seen.push(emitted as never));
+    return seen;
+  };
+
+  test("says so when the last thing the Bot did was use a tool", () => {
+    const seen = collect([
+      "RUN_STARTED",
+      "TEXT_MESSAGE_START",
+      "TEXT_MESSAGE_CONTENT",
+      "TEXT_MESSAGE_END",
+      "TOOL_CALL_START",
+      "TOOL_CALL_END",
+      "TOOL_CALL_RESULT",
+      "RUN_FINISHED",
+    ]);
+
+    const errors = seen.filter((emitted) => emitted.type === "RUN_ERROR");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.message).toBe("Scout ran out of turn.");
+    /*
+     * Ahead of the RUN_FINISHED it explains, and the RUN_FINISHED still goes through. This adds a
+     * sentence to a run whose own bookkeeping was fine; it does not fail a turn that succeeded.
+     */
+    expect(seen.map((emitted) => emitted.type).slice(-2)).toEqual([
+      "RUN_ERROR",
+      "RUN_FINISHED",
+    ]);
+  });
+
+  test("stays quiet when the Bot spoke after its tools", () => {
+    const seen = collect([
+      "RUN_STARTED",
+      "TOOL_CALL_START",
+      "TOOL_CALL_RESULT",
+      "TEXT_MESSAGE_START",
+      "TEXT_MESSAGE_CONTENT",
+      "TEXT_MESSAGE_END",
+      "RUN_FINISHED",
+    ]);
+
+    expect(seen.some((emitted) => emitted.type === "RUN_ERROR")).toBe(false);
+  });
+
+  test("leaves a run that produced nothing at all to its own reporting", () => {
+    const seen = collect(["RUN_STARTED", "RUN_FINISHED"]);
+
+    expect(seen.some((emitted) => emitted.type === "RUN_ERROR")).toBe(false);
+  });
+
+  /*
+   * Thinking is not answering. A model that reasons, calls a tool and stops has told the person
+   * nothing, and counting a reasoning block as speech would hide exactly these runs.
+   */
+  test("does not count reasoning as having answered", () => {
+    const seen = collect([
+      "RUN_STARTED",
+      "TOOL_CALL_RESULT",
+      "REASONING_MESSAGE_CONTENT",
+      "RUN_FINISHED",
+    ]);
+
+    expect(seen.some((emitted) => emitted.type === "RUN_ERROR")).toBe(true);
+  });
+
+  test("names the Bot and the cap, and says what to do next", () => {
+    const sentence = ranOutOfTurnSentence("Scout NL", 8);
+
+    expect(sentence).toContain("Scout NL");
+    expect(sentence).toContain("8 steps");
+    expect(sentence).toContain("carry on");
   });
 });

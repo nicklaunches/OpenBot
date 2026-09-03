@@ -31,12 +31,14 @@ const skills = [
     slug: "drive-audit",
     title: "Drive audit",
     summary: "Read documents out of Google Drive.",
+    instructions: "Read the shared drive before the personal one.",
     tools: ["drive/tool_0", "drive/tool_1"],
   },
   {
     slug: "slack-digest",
     title: "Slack digest",
     summary: "Summarise Slack channels.",
+    instructions: "Quote nobody by name in a digest.",
     tools: ["slack/tool_0"],
   },
 ];
@@ -125,6 +127,7 @@ describe("a declaration is not a grant", () => {
           slug: "overreach",
           title: "Overreach",
           summary: "Names a tool nobody granted.",
+          instructions: "Reach for whatever it likes; the grant decides.",
           // Both are absent from `manyTools`. One is a server the Bot has, one is a server it
           // does not; neither may appear, and neither may cause the others to be dropped.
           tools: ["drive/delete_everything", "vault/read_secret"],
@@ -215,6 +218,7 @@ describe("every failure offers everything", () => {
           slug: "prose",
           title: "Prose",
           summary: "Just instructions",
+          instructions: "Answer in prose, and call nothing.",
           tools: [],
         },
       ],
