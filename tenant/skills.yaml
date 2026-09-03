@@ -329,8 +329,11 @@ skills:
       website address; call check_launch_readiness only for products that have already passed the
       fit and contact checks, at most ten in one run, because that tool is rate limited. A product
       already listed is saved with On Nick Launches set to Listed and Status set to Skipped, not
-      dropped, so it is not read again tomorrow. Before saving anything, search Notion for the
-      product name and its website address and skip what is already there. Then find a contact and
+      dropped, so it is not read again tomorrow. Before saving anything, check the Product Leads
+      table for the product with notion-query-data-sources: a read-only SQL query against the table
+      "collection://3d061d27-ae3f-803b-9fc9-000b45177c27", such as selecting Product, URL and
+      Status where lower(URL) contains the product's domain or Product matches its name, and skip
+      what is already there. Then find a contact and
       save the lead with the other two skills. Score fit from 0 to 100: paid or SaaS, indie or small
       team, contact found, and not listed each count, and a tagline that names a business problem
       counts more than one that names a hobby. Finish with a short report: how many launches you
@@ -342,6 +345,7 @@ skills:
       - nicklaunches/search_products
       - nicklaunches/get_product
       - nicklaunches/check_launch_readiness
+      - notion/notion-query-data-sources
       - notion/notion-search
       - notion/notion-fetch
 
@@ -380,11 +384,13 @@ skills:
       Rejected, Skipped), Upvotes, Notes. Fill every property you know and leave the rest empty
       rather than guessing. A new lead is Status New; a product that failed a rule but is worth
       remembering, such as one already listed, is Status Skipped with the reason in Fit reason.
-      Before creating a page, search Notion for the product name and its website address; when a row
-      exists, update it rather than creating a second, and never change a Status that is anything
-      other than New or Skipped, because a person set it. Say which rows you created and which you
-      updated, by product name.
+      Before creating a page, look the product up with notion-query-data-sources, a read-only SQL
+      query against the table "collection://3d061d27-ae3f-803b-9fc9-000b45177c27" by URL domain or
+      by Product name; when a row exists, update it with notion-update-page rather than creating a
+      second, and never change a Status that is anything other than New or Skipped, because a
+      person set it. Say which rows you created and which you updated, by product name.
     tools:
+      - notion/notion-query-data-sources
       - notion/notion-search
       - notion/notion-fetch
       - notion/notion-create-pages

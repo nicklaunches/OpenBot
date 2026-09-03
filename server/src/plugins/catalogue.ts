@@ -266,6 +266,11 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
       "notion-create-view",
       "notion-duplicate-page",
       "notion-move-pages",
+      // Agent sessions Notion added in 2026: starting one, writing into one and stopping one each
+      // act on the person's workspace, and none of them is a read.
+      "notion-send-message-to-session",
+      "notion-spawn-session",
+      "notion-stop-session",
       "notion-update-data-source",
       "notion-update-folder",
       "notion-update-page",
