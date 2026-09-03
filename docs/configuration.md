@@ -193,6 +193,7 @@ Two things are worth knowing before pointing a deployment at any gateway. Not ev
 | `INITIAL_ADMIN_EMAILS`       | Comma-separated administrators. **Required** with any provider.                        |
 | `OPENBOT_PUBLIC_URL`         | Public address of this API. Defaults to `BETTER_AUTH_URL`.                              |
 | `OPENBOT_APP_URL`            | Where the browser app is served. Defaults to the first `TRUSTED_ORIGINS` entry.          |
+| `APP_ALLOWED_HOSTS`          | Hostnames the Vite dev server answers to besides localhost, comma separated; a leading dot allows a domain. Read by the app process, not the API. Needed when the app is opened through a name such as a Tailscale one, which Vite otherwise refuses with a 403. |
 
 **With no provider at all, `OPENBOT_SINGLE_USER=true` is required.** A deployment that configures
 nothing to sign anybody in and does not say that was deliberate refuses to start, naming what to
