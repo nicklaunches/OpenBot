@@ -327,12 +327,13 @@ describe("Mailbox", () => {
   });
 
   test("pins the exact write list, so a dropped or renamed entry fails here", () => {
-    // Sending is the irrevocable one; the two markings change one flag a person sees in their mail
-    // client and each undoes the other. All three are writes so a policy that gates writes can say so.
+    // Sending is the irrevocable one; the other three change the deployment's own mailbox and are
+    // undone by hand in any mail client. All four are writes so a policy that gates writes can say so.
     expect(entry?.writeTools).toEqual([
       "send_message",
       "mark_read",
       "mark_unread",
+      "archive_messages",
     ]);
   });
 
@@ -340,6 +341,7 @@ describe("Mailbox", () => {
     expect(classifyTool(entry, "send_message", true)).toBe("write");
     expect(classifyTool(entry, "mark_read", true)).toBe("write");
     expect(classifyTool(entry, "mark_unread", true)).toBe("write");
+    expect(classifyTool(entry, "archive_messages", true)).toBe("write");
     expect(classifyTool(entry, "list_messages", true)).toBe("read");
     expect(classifyTool(entry, "read_message", true)).toBe("read");
     expect(classifyTool(entry, "search_messages", true)).toBe("read");
@@ -350,6 +352,7 @@ describe("Mailbox", () => {
       "send_message",
       "mark_read",
       "mark_unread",
+      "archive_messages",
       "list_messages",
       "read_message",
       "search_messages",

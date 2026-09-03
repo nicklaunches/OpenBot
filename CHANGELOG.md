@@ -8,6 +8,24 @@ Newest first. `Unreleased` is what is on `main` and not yet tagged.
 
 ## Unreleased
 
+### A Bot can archive mail
+
+The Mailbox connector has a seventh tool, `archive_messages`, which takes a list of uids and the
+folder they came from and moves those messages into that account's archive folder. Until now the
+connector could mark a message handled but not get it out of the inbox, so an inbox worked through
+by a Bot looked exactly as full afterwards. The destination is never an argument: it is the archive
+folder of the same account, found by its IMAP special-use flag or by name, and created as `Archive`
+when the account has none. Nothing is deleted, and there is no tool that moves mail to Trash or
+Junk. Archiving does not mark anything read, so a Bot that wants both calls `mark_read` first, while
+the uids still name the messages — a message that has moved has a new uid in the archive, and the
+answer says so.
+
+It is a write in the catalogue, like the two markings, and the same shape of answer: every uid comes
+back as archived or as not in the folder, never as a count.
+
+After upgrading, press **Refresh** on `/admin/plugins/mailbox` so the stored tool list carries the
+new name, then grant it to the Bots that should have it. Nothing is offered until both are done.
+
 ### A Bot can mark mail read and unread
 
 The Mailbox connector has two new tools, `mark_read` and `mark_unread`, each taking a list of uids

@@ -273,12 +273,17 @@ skills:
       ticket, or judged to need nothing, call mark_read with its uid and the same account and folder
       so the mailbox shows what has been handled; mark_unread puts one back for a person to look at.
       Reading a message never marks it, so do this deliberately and say which uids you marked.
+      To take handled mail out of the inbox as well, call archive_messages with the same uids and
+      folder, which moves it into that account's archive folder and deletes nothing. Mark it read
+      first, because a message that has moved has a new uid there and the numbers you had stop
+      naming it; say which uids you archived and which folder they went to.
     tools:
       - mailbox/list_messages
       - mailbox/read_message
       - mailbox/search_messages
       - mailbox/mark_read
       - mailbox/mark_unread
+      - mailbox/archive_messages
       - mailbox/send_message
 
   - slug: search-console

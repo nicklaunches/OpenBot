@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { MailboxConfig } from "../src/config";
 import {
+  ARCHIVE_FOLDER,
+  type ArchiveFolder,
+  archiveFolderFrom,
   composeMessage,
   createMailboxClients,
   type FlagReceipt,
@@ -14,6 +17,7 @@ import {
   type MailboxSession,
   type MessageHeader,
   type MessagePage,
+  type MoveReceipt,
   mailServerSentence,
   noSuchFolderSentence,
   type OutgoingMessage,
@@ -26,6 +30,7 @@ import {
   withDeadline,
 } from "../src/mailbox/client";
 import {
+  archivedInWords,
   boundedLimit,
   callTool,
   listTools,
@@ -113,6 +118,8 @@ type Recorded =
   | { method: "message"; mailbox: string; uid: number }
   | { method: "search"; mailbox: string; query: string; limit: number }
   | { method: "flag"; mailbox: string; uids: number[]; seen: boolean }
+  | { method: "archive" }
+  | { method: "move"; mailbox: string; uids: number[]; target: string }
   | { method: "send"; message: OutgoingMessage };
 
 type Stubs = {
@@ -128,6 +135,12 @@ type Stubs = {
     uids: number[],
     seen: boolean,
   ) => Promise<FlagReceipt>;
+  archive?: () => Promise<ArchiveFolder>;
+  move?: (
+    mailbox: string,
+    uids: number[],
+    target: string,
+  ) => Promise<MoveReceipt>;
   send?: (message: OutgoingMessage) => Promise<SendReceipt>;
   password?: (account: string) => Promise<string | null>;
   /** A deployment configured differently from {@link CONFIG}, for the allowlist cases. */
@@ -184,6 +197,18 @@ function recordingMailbox(stubs: Stubs = {}): {
             ? await stubs.flag(mailbox, uids, seen)
             : { changed: [...uids], unchanged: [], missing: [] };
         },
+        async archive() {
+          calls.push({ method: "archive" });
+          return stubs.archive
+            ? await stubs.archive()
+            : { path: ARCHIVE_FOLDER, created: false };
+        },
+        async move(mailbox, uids, target) {
+          calls.push({ method: "move", mailbox, uids, target });
+          return stubs.move
+            ? await stubs.move(mailbox, uids, target)
+            : { moved: [...uids], missing: [] };
+        },
       };
       return {
         withSession: (use) => use(session),
@@ -211,7 +236,7 @@ afterEach(() => {
 });
 
 describe("the tool list", () => {
-  test("is the six mailbox tools, named exactly", async () => {
+  test("is the seven mailbox tools, named exactly", async () => {
     const tools = await listTools();
     expect(tools.map((tool) => tool.name)).toEqual([
       "list_messages",
@@ -219,6 +244,7 @@ describe("the tool list", () => {
       "search_messages",
       "mark_read",
       "mark_unread",
+      "archive_messages",
       "send_message",
     ]);
     for (const tool of tools) {
@@ -239,6 +265,7 @@ describe("the tool list", () => {
     expect(required.search_messages).toEqual(["query"]);
     expect(required.mark_read).toEqual(["uids"]);
     expect(required.mark_unread).toEqual(["uids"]);
+    expect(required.archive_messages).toEqual(["uids"]);
     expect(required.send_message).toEqual(["to", "subject", "body"]);
   });
 
@@ -339,7 +366,7 @@ describe("the tool list", () => {
     // The only call site is `refreshTools`, which passes `{url, token}`. A list that emptied itself
     // when a variable was unset would revoke an administrator's grants by accident.
     useMailbox(null);
-    expect(await listTools()).toHaveLength(6);
+    expect(await listTools()).toHaveLength(7);
   });
 });
 
@@ -352,6 +379,7 @@ describe("a deployment with no mailbox", () => {
       "search_messages",
       "mark_read",
       "mark_unread",
+      "archive_messages",
       "send_message",
     ]) {
       const result = await callTool(CONNECTION, tool, { uid: 1 });
@@ -1181,6 +1209,220 @@ describe("marking read and unread", () => {
     const result = await callTool(CONNECTION, "mark_read", { uids: [3] });
     expect(result.isError).toBe(true);
     expect(result.text).toContain("Nothing was marked");
+  });
+});
+
+describe("archiving", () => {
+  test("moves the uids named into the account's archive folder and names each one back", async () => {
+    const { calls } = recordingMailbox();
+    const result = await callTool(CONNECTION, "archive_messages", {
+      uids: [5632, 5620],
+    });
+
+    expect(result.isError).toBe(false);
+    // The folder is resolved and the move issued on one session, in that order.
+    expect(calls).toEqual([
+      { method: "archive" },
+      {
+        method: "move",
+        mailbox: "INBOX",
+        uids: [5632, 5620],
+        target: "Archive",
+      },
+    ]);
+    expect(result.text).toContain(
+      `Archived 2 messages out of folder INBOX of ${DEFAULT_ACCOUNT} into folder Archive: uid 5632, 5620.`,
+    );
+    /*
+     * The load-bearing sentence. A moved message has a new uid in the destination, so the numbers
+     * just passed name nothing; a model that does not know that reads one of them back out of the
+     * inbox and summarizes whatever message now holds it.
+     */
+    expect(result.text).toContain("new uid in Archive");
+    expect(result.text).toContain("list that folder");
+  });
+
+  test("archives out of the folder the uids came from, in the account it was told to", async () => {
+    const { calls, unlocked } = recordingMailbox();
+    const result = await callTool(CONNECTION, "archive_messages", {
+      account: ACCOUNTS[1],
+      folder: "Newsletters",
+      uids: [3],
+    });
+
+    expect(unlocked).toEqual([ACCOUNTS[1]]);
+    expect(calls).toEqual([
+      { method: "archive" },
+      { method: "move", mailbox: "Newsletters", uids: [3], target: "Archive" },
+    ]);
+    expect(result.text).toContain(`folder Newsletters of ${ACCOUNTS[1]}`);
+  });
+
+  test("reads the uids in the same shapes a marking does, and refuses the same things", async () => {
+    const { calls } = recordingMailbox();
+    await callTool(CONNECTION, "archive_messages", { uids: 42 });
+    await callTool(CONNECTION, "archive_messages", { uid: "7, 8" });
+    expect(calls.filter((call) => call.method === "move")).toEqual([
+      { method: "move", mailbox: "INBOX", uids: [42], target: "Archive" },
+      { method: "move", mailbox: "INBOX", uids: [7, 8], target: "Archive" },
+    ]);
+
+    // The refusals say what did NOT happen, in this tool's own word, so a model is never told
+    // "nothing was marked" about a call that was archiving.
+    const nothing = await callTool(CONNECTION, "archive_messages", {});
+    expect(nothing.isError).toBe(true);
+    expect(nothing.text).toContain("Say which messages to archive");
+
+    const fraction = await callTool(CONNECTION, "archive_messages", {
+      uids: [12.7],
+    });
+    expect(fraction.isError).toBe(true);
+    expect(fraction.text).toContain("Nothing was archived.");
+
+    const many = await callTool(CONNECTION, "archive_messages", {
+      uids: Array.from({ length: 101 }, (_, i) => i + 1),
+    });
+    expect(many.isError).toBe(true);
+    expect(many.text).toContain(
+      "101 uids is more than the 100 one call archives",
+    );
+    expect(many.text).toContain("Nothing was archived");
+
+    // Nothing that was refused reached the mailbox at all.
+    expect(calls.filter((call) => call.method === "move")).toHaveLength(2);
+  });
+
+  test("a folder that had to be created is said, because nobody asked for it by name", async () => {
+    const { calls } = recordingMailbox({
+      archive: async () => ({ path: "INBOX.Archive", created: true }),
+    });
+    const result = await callTool(CONNECTION, "archive_messages", {
+      uids: [4],
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain(
+      "This account had no archive folder, so folder INBOX.Archive was created.",
+    );
+    // Whatever the server called it is what the move goes to, prefix and all.
+    expect(calls).toContainEqual({
+      method: "move",
+      mailbox: "INBOX",
+      uids: [4],
+      target: "INBOX.Archive",
+    });
+  });
+
+  test("archiving the archive is refused before anything is moved", async () => {
+    /*
+     * IMAP would accept a MOVE from a folder to itself and what it does with it is server-specific.
+     * Some copy and expunge, which would hand back a receipt full of uids that no longer name
+     * anything, for no change at all.
+     */
+    const { calls } = recordingMailbox();
+    const result = await callTool(CONNECTION, "archive_messages", {
+      folder: "archive",
+      uids: [1, 2],
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("is this account's archive folder");
+    expect(result.text).toContain("already filed");
+    expect(calls).toEqual([{ method: "archive" }]);
+  });
+
+  test("says which uids were not in the folder, and still succeeds when some moved", async () => {
+    recordingMailbox({
+      move: async () => ({ moved: [5632], missing: [99] }),
+    });
+    const result = await callTool(CONNECTION, "archive_messages", {
+      uids: [5632, 99],
+    });
+
+    // The mail was filed. A model told this failed would try to file it again by uids that have
+    // stopped naming anything.
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("Archived 1 message out of folder INBOX");
+    expect(result.text).toContain("no message with uid 99 in folder INBOX");
+    expect(result.text).toContain("per folder");
+  });
+
+  test("a list where nothing named exists is a failure that names them", async () => {
+    recordingMailbox({ move: async () => ({ moved: [], missing: [8, 9] }) });
+    const result = await callTool(CONNECTION, "archive_messages", {
+      uids: [8, 9],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("no message with uid 8, 9 in folder INBOX");
+  });
+
+  test("a uid too large for IMAP is a message that is not there, and the rest still move", async () => {
+    const { calls } = recordingMailbox();
+    const result = await callTool(CONNECTION, "archive_messages", {
+      uids: [5, 4_294_967_296],
+    });
+    expect(calls).toContainEqual({
+      method: "move",
+      mailbox: "INBOX",
+      uids: [5],
+      target: "Archive",
+    });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain("Archived 1 message");
+    expect(result.text).toContain("no message with uid 4294967296");
+
+    // On its own it never reaches the mailbox, not even to look the folder up.
+    const only = await callTool(CONNECTION, "archive_messages", {
+      uids: [4_294_967_296],
+    });
+    expect(only.isError).toBe(true);
+    expect(calls.filter((call) => call.method === "move")).toHaveLength(1);
+  });
+
+  test("a server that refuses the move is reported as nothing archived", async () => {
+    recordingMailbox({
+      move: async () => {
+        throw new MailboxError(
+          "The mail server refused to move messages from folder INBOX to Archive in bot@example.test. One of the two folders may be read-only. Nothing was archived.",
+        );
+      },
+    });
+    const result = await callTool(CONNECTION, "archive_messages", {
+      uids: [3],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("Nothing was archived");
+  });
+
+  test("an account that cannot be unlocked never reaches the mailbox", async () => {
+    const { calls } = recordingMailbox({ password: async () => null });
+    const result = await callTool(CONNECTION, "archive_messages", {
+      uids: [1],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain("holds no password");
+    expect(calls).toEqual([]);
+  });
+
+  test("puts the answer together, on its own", () => {
+    const both = archivedInWords(
+      { moved: [1, 2], missing: [9] },
+      "folder INBOX of bot@example.test",
+      { path: "Archive", created: false },
+    );
+    expect(both.split("\n")[0]).toBe(
+      "Archived 2 messages out of folder INBOX of bot@example.test into folder Archive: uid 1, 2.",
+    );
+    expect(both).toContain("no message with uid 9");
+    // Nothing is said about a folder that was already there.
+    expect(both).not.toContain("was created");
+
+    const none = archivedInWords(
+      { moved: [], missing: [4] },
+      "folder INBOX of bot@example.test",
+      { path: "Archive", created: false },
+    );
+    expect(none).not.toContain("Archived");
   });
 });
 
@@ -2169,5 +2411,154 @@ describe("the flag change on the wire", () => {
     await expect(
       clients.withSession((session) => session.flag("INBOX", [1], true)),
     ).rejects.toThrow(/refused to change the read flag.*Nothing was marked/);
+  });
+});
+
+describe("the move on the wire", () => {
+  type Moved = { range: number[]; destination: string; options: unknown };
+
+  /**
+   * The real client wired to an IMAP that records what it was asked, holding `exists` uids.
+   *
+   * What is worth asserting here cannot be seen one level up: that the uids are READ before the
+   * MOVE, that the MOVE names only the ones that are there and goes by uid rather than by
+   * sequence, that the archive folder is the one the server listed, and that a server answering
+   * `false` becomes a refusal rather than a receipt.
+   */
+  function wired(options: {
+    exists: number[];
+    folders?: { path: string; name?: string; specialUse?: string }[];
+    refuse?: boolean;
+    createFails?: string;
+  }) {
+    const moved: Moved[] = [];
+    const created: string[] = [];
+    const listed = options.folders ?? [
+      { path: "INBOX", name: "INBOX" },
+      { path: "Archive", name: "Archive" },
+    ];
+    const clients = createMailboxClients(CONFIG, DEFAULT_ACCOUNT, PASSWORD, {
+      imap: () =>
+        ({
+          connect: async () => {},
+          logout: async () => {},
+          close: () => {},
+          getMailboxLock: async () => ({ release: () => {} }),
+          list: async () => listed,
+          mailboxCreate: async (path: string) => {
+            if (options.createFails) throw new Error(options.createFails);
+            created.push(path);
+            return { path, created: true };
+          },
+          fetch: async function* (range: number[]) {
+            for (const uid of range) {
+              if (options.exists.includes(uid)) yield { uid };
+            }
+          },
+          messageMove: async (
+            range: number[],
+            destination: string,
+            moveOptions: unknown,
+          ) => {
+            moved.push({ range, destination, options: moveOptions });
+            return options.refuse ? false : ({ destination } as never);
+          },
+        }) as unknown as ImapLike,
+    });
+    return { clients, moved, created };
+  }
+
+  test("reads the uids first, then moves only the ones that are there, by uid", async () => {
+    const { clients, moved } = wired({ exists: [1, 2] });
+    const receipt = await clients.withSession((session) =>
+      session.move("INBOX", [2, 9, 1], "Archive"),
+    );
+
+    expect(moved).toEqual([
+      { range: [1, 2], destination: "Archive", options: { uid: true } },
+    ]);
+    expect(receipt).toEqual({ moved: [1, 2], missing: [9] });
+  });
+
+  test("a folder holding none of them is never moved from at all", async () => {
+    const { clients, moved } = wired({ exists: [] });
+    const receipt = await clients.withSession((session) =>
+      session.move("INBOX", [4], "Archive"),
+    );
+    expect(receipt).toEqual({ moved: [], missing: [4] });
+    expect(moved).toEqual([]);
+  });
+
+  test("a server that answers no to the MOVE is a refusal, not a receipt", async () => {
+    const { clients } = wired({ exists: [1], refuse: true });
+    await expect(
+      clients.withSession((session) => session.move("INBOX", [1], "Archive")),
+    ).rejects.toThrow(/refused to move messages.*Nothing was archived/);
+  });
+
+  test("finds the archive folder the server listed, and creates one only when there is none", async () => {
+    const found = wired({
+      exists: [],
+      folders: [
+        { path: "INBOX", name: "INBOX" },
+        { path: "INBOX.Vieux", name: "Vieux", specialUse: "\\Archive" },
+      ],
+    });
+    expect(
+      await found.clients.withSession((session) => session.archive()),
+    ).toEqual({ path: "INBOX.Vieux", created: false });
+    expect(found.created).toEqual([]);
+
+    /*
+     * An account that has never archived anything has no archive folder, which is the ordinary
+     * state of a fresh mailbox rather than a misconfiguration. Refusing over it would be refusing
+     * over one command every mail client issues without asking.
+     */
+    const fresh = wired({
+      exists: [],
+      folders: [{ path: "INBOX", name: "INBOX" }],
+    });
+    expect(
+      await fresh.clients.withSession((session) => session.archive()),
+    ).toEqual({ path: "Archive", created: true });
+    expect(fresh.created).toEqual(["Archive"]);
+  });
+
+  test("a server that will not create one says so, in its own words", async () => {
+    const { clients } = wired({
+      exists: [],
+      folders: [{ path: "INBOX", name: "INBOX" }],
+      createFails: "Permission denied",
+    });
+    // There is nowhere to put the mail, so this is the whole call failing rather than a move into
+    // a folder that is not there.
+    await expect(
+      clients.withSession((session) => session.archive()),
+    ).rejects.toThrow(/Permission denied/);
+  });
+
+  test("picks the archive folder out of a LIST, on its own", () => {
+    expect(
+      archiveFolderFrom([
+        { path: "INBOX", name: "INBOX" },
+        { path: "Sent", name: "Sent" },
+        { path: "A", name: "A", specialUse: "\\Archive" },
+      ]),
+    ).toBe("A");
+    // The flag first, the names second: a localised server calls it something no list will hold.
+    expect(
+      archiveFolderFrom([
+        { path: "INBOX", name: "INBOX" },
+        { path: "INBOX.Archives", name: "Archives" },
+      ]),
+    ).toBe("INBOX.Archives");
+    // Null is the answer that gets a folder created, so it must not be a guess at one that exists
+    // for something else.
+    expect(
+      archiveFolderFrom([
+        { path: "INBOX", name: "INBOX" },
+        { path: "All Mail", name: "All Mail" },
+      ]),
+    ).toBeNull();
   });
 });

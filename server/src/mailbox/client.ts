@@ -121,10 +121,18 @@ export type OutgoingMessage = {
 /**
  * One open IMAP connection, as the tools need it.
  *
- * Deliberately narrow. Nothing a model calls has any business deleting a message or moving one, so
- * none of that is here. The one flag it may touch is `\Seen`, through {@link MailboxSession.flag},
- * because "mark these read" is the ordinary end of handling mail and is reversible by the same
- * call. Same reasoning that keeps `RoutineTools` down to four of `RoutineStore`'s methods.
+ * Deliberately narrow. Nothing a model calls has any business DELETING a message, and nothing here
+ * does: the one flag it may touch is `\Seen`, through {@link MailboxSession.flag}, and the one place
+ * it may move a message to is that account's own Archive folder, through {@link
+ * MailboxSession.move}. Both are the ordinary end of handling mail and both are undone by hand in
+ * any mail client. Same reasoning that keeps `RoutineTools` down to four of `RoutineStore`'s
+ * methods.
+ *
+ * WHY MOVE IS NOT A GENERAL MOVE. The destination is not a caller's argument anywhere above this:
+ * `move` is only ever handed the folder {@link MailboxSession.archive} resolved, so there is no
+ * path from a tool call to Trash or Junk. A general move would be a delete with extra steps, since
+ * a message in Trash is one expunge from gone and a message in Junk teaches the server the sender
+ * is spam.
  */
 export type MailboxSession = {
   /** The newest `limit` messages in `mailbox`, newest first. */
@@ -135,6 +143,44 @@ export type MailboxSession = {
   search(mailbox: string, query: string, limit: number): Promise<MessagePage>;
   /** Set (`seen`) or clear `\Seen` on each of `uids` in `mailbox`, and say what that did. */
   flag(mailbox: string, uids: number[], seen: boolean): Promise<FlagReceipt>;
+  /** Where this account files archived mail, creating the folder when it has none. */
+  archive(): Promise<ArchiveFolder>;
+  /** Move `uids` out of `mailbox` and into `target`, and say which were there to move. */
+  move(mailbox: string, uids: number[], target: string): Promise<MoveReceipt>;
+};
+
+/**
+ * The folder archived mail goes to, and whether this call had to make it.
+ *
+ * `created` is carried rather than swallowed because it is a change to the account that a person
+ * will see in their mail client and did not ask for. Said in the answer, an administrator who finds
+ * a new folder knows what made it; unsaid, it is a mystery folder in the deployment's mailbox.
+ */
+export type ArchiveFolder = {
+  /** The folder's full IMAP path, which is not always its name: `INBOX.Archive` is common. */
+  path: string;
+  /** Whether this deployment created it just now, rather than finding it. */
+  created: boolean;
+};
+
+/**
+ * What one move did, uid by uid.
+ *
+ * Two lists rather than a count, for the reason {@link FlagReceipt} has three: IMAP `MOVE` says
+ * nothing about which of the uids it was given were actually there, so a uid deleted since the
+ * listing would otherwise be reported as archived. The uids are read first and the move is issued
+ * only for the ones that exist.
+ *
+ * There is no `unchanged` here, because there is no such thing: a message that is in the folder is
+ * moved, and one that is not is missing. `moved` holds the SOURCE uids, which is what the caller
+ * named; the destination gives every one of them a new uid, and that is said in the answer rather
+ * than reported here, since nothing above this can do anything with the new numbers.
+ */
+export type MoveReceipt = {
+  /** The uids that were in the folder and were moved out of it. */
+  moved: number[];
+  /** The uids the folder does not hold. */
+  missing: number[];
 };
 
 /**
@@ -276,6 +322,41 @@ export function sentFolderFrom(
 
   const named = boxes.find((box) =>
     SENT_NAMES.has((box.name ?? box.path).toLowerCase()),
+  );
+  return named ? named.path : null;
+}
+
+/** The special-use flag every IMAP server that has an Archive folder marks it with (RFC 6154). */
+const ARCHIVE_SPECIAL_USE = "\\Archive";
+
+/** What an Archive folder is called on a server that marks nothing. Lower-cased. */
+const ARCHIVE_NAMES = new Set(["archive", "archives"]);
+
+/** What this deployment creates when an account has no archive folder at all. */
+export const ARCHIVE_FOLDER = "Archive";
+
+/**
+ * Which folder archived mail belongs in, out of what the server listed.
+ *
+ * Special-use first and names second, for the same reasons as {@link sentFolderFrom}: the flag is
+ * the answer that survives a localised server, where the folder is `Archiv` or `Archives` or
+ * something no English list will ever hold.
+ *
+ * NULL IS NOT A FAILURE HERE, which is where this differs from the Sent case. A server that marks
+ * nothing and has no folder by either name has no archive, and the caller creates one: an account
+ * that has never archived anything is the ordinary state of a fresh mailbox, and refusing to
+ * archive because of it would be refusing over a folder that takes one command to make. What is
+ * never done is guessing at a folder that exists for something else, which is exactly what a
+ * looser name list ("all mail", "old") would do.
+ */
+export function archiveFolderFrom(
+  boxes: readonly { path: string; name?: string; specialUse?: string }[],
+): string | null {
+  const marked = boxes.find((box) => box.specialUse === ARCHIVE_SPECIAL_USE);
+  if (marked) return marked.path;
+
+  const named = boxes.find((box) =>
+    ARCHIVE_NAMES.has((box.name ?? box.path).toLowerCase()),
   );
   return named ? named.path : null;
 }
@@ -567,6 +648,8 @@ export type ImapLike = Pick<
   | "append"
   | "messageFlagsAdd"
   | "messageFlagsRemove"
+  | "messageMove"
+  | "mailboxCreate"
 >;
 
 /** As much of nodemailer as this module speaks. */
@@ -855,6 +938,79 @@ export function createMailboxClients(
               if (!stored) {
                 throw new MailboxError(
                   `The mail server refused to change the read flag in folder ${mailbox} of ${account}. The folder may be read-only. Nothing was marked.`,
+                );
+              }
+              return receipt;
+            });
+          },
+
+          async archive() {
+            /*
+             * LOOKED UP PER CALL, never remembered. It is one LIST on a connection that is already
+             * open and inside the same deadline as the move it precedes, and the alternative is a
+             * cached path that a person renaming a folder in webmail turns into a move into a
+             * folder that is not there.
+             */
+            const found = archiveFolderFrom(await client.list());
+            if (found) return { path: found, created: false };
+
+            /*
+             * CREATED RATHER THAN REFUSED, and this is the one place this module makes a folder.
+             *
+             * An account that has never archived anything has no archive folder, which is the
+             * ordinary state of a fresh mailbox rather than a misconfiguration, and a connector
+             * that answered "this account has no Archive folder" would be refusing over one
+             * command that every mail client issues without asking. It is made at the top level
+             * under whatever namespace prefix the server wants, which is imapflow's own
+             * normalisation, so a server that keeps everything under `INBOX.` gets
+             * `INBOX.Archive`.
+             *
+             * A server that refuses to create it throws, and that is the right answer: the account
+             * has no archive and this deployment could not make one, so there is nowhere to put
+             * the mail and nothing was moved.
+             */
+            const made = await client.mailboxCreate(ARCHIVE_FOLDER);
+            return { path: made.path, created: made.created };
+          },
+
+          async move(mailbox, uids, target) {
+            return withMailbox(client, mailbox, async () => {
+              /*
+               * READ BEFORE WRITE, for the receipt, exactly as `flag` does it and for a sharper
+               * version of the same reason. A MOVE skips a uid that is not there without a word,
+               * so a call told "archive 27 messages" that found 24 would answer that 27 were
+               * archived, and the three still sitting in the inbox would be nobody's to notice.
+               */
+              const wanted = [...new Set(uids)].sort((a, b) => a - b);
+              const present: number[] = [];
+              for await (const message of client.fetch(
+                wanted,
+                { uid: true },
+                { uid: true },
+              )) {
+                present.push(message.uid);
+              }
+
+              const there = new Set(present);
+              const receipt: MoveReceipt = {
+                moved: wanted.filter((uid) => there.has(uid)),
+                missing: wanted.filter((uid) => !there.has(uid)),
+              };
+              if (receipt.moved.length === 0) return receipt;
+
+              const moved = await client.messageMove(receipt.moved, target, {
+                uid: true,
+              });
+              /*
+               * imapflow answers `false` for a MOVE the server refused rather than throwing, and a
+               * refusal that came back as a receipt saying "archived" is the lie this receipt
+               * exists to prevent: the mail would still be in the inbox and a Bot would have said
+               * it was filed. A read-only source folder or a destination the account may not write
+               * to is the usual reason.
+               */
+              if (!moved) {
+                throw new MailboxError(
+                  `The mail server refused to move messages from folder ${mailbox} to ${target} in ${account}. One of the two folders may be read-only. Nothing was archived.`,
                 );
               }
               return receipt;

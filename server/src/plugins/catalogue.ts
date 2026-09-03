@@ -302,7 +302,7 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
     title: "Mailbox",
     vendor: "OpenBot",
     summary:
-      "Read, mark and send email from the deployment's mailbox, as the Bot granted it.",
+      "Read, mark, archive and send email from the deployment's mailbox, as the Bot granted it.",
     /*
      * In-process, like Routines, and in the catalogue for a sharper version of the same reason.
      * There is no vendor to review here, but there is a capability to grant: mail is the one thing
@@ -323,14 +323,21 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
     // that the access was not theirs.
     auth: Object.freeze({ kind: "builtin", reachedAs: "deployment" }),
     /*
-     * Three writes, of two very different weights, and the difference is the whole reason this
-     * entry is grantable per tool. `send_message` reaches people outside the deployment and cannot
-     * be recalled. The two markings change one flag on the deployment's own server and each undoes
-     * the other; they are writes because they change state a person sees in their mail client, and
-     * a policy that gates writes should get to say so, but a deployment that approval-gates
-     * `send_message` has no reason to gate these the same way.
+     * Four writes, of two very different weights, and the difference is the whole reason this entry
+     * is grantable per tool. `send_message` reaches people outside the deployment and cannot be
+     * recalled. The other three change the deployment's own mailbox and are all undone by hand in
+     * any mail client: the two markings set and clear one flag, and `archive_messages` files mail
+     * in a folder of the same account without deleting anything. They are writes because they
+     * change state a person sees in their mail client, and a policy that gates writes should get
+     * to say so, but a deployment that approval-gates `send_message` has no reason to gate these
+     * the same way.
      */
-    writeTools: Object.freeze(["send_message", "mark_read", "mark_unread"]),
+    writeTools: Object.freeze([
+      "send_message",
+      "mark_read",
+      "mark_unread",
+      "archive_messages",
+    ]),
     docsUrl: "https://github.com/CopilotKit/OpenBot/blob/main/docs/mailbox.md",
   },
   {

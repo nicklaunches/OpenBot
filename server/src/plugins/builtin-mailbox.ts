@@ -1,5 +1,6 @@
 import type { MailboxConfig } from "../config";
 import {
+  type ArchiveFolder,
   createMailboxClients,
   type FlagReceipt,
   type FullMessage,
@@ -9,6 +10,7 @@ import {
   MailboxError,
   type MessageHeader,
   type MessagePage,
+  type MoveReceipt,
   type OutgoingMessage,
 } from "../mailbox/client";
 import { MAX_RESULT_CHARS, type McpCallResult, type McpTool } from "./mcp";
@@ -138,7 +140,7 @@ const SEARCH_LIMIT = { fallback: 20, max: 50 } as const;
 const MAX_UID = 4_294_967_295;
 
 /**
- * How many messages one `mark_read` or `mark_unread` call may touch.
+ * How many messages one `mark_read`, `mark_unread` or `archive_messages` call may touch.
  *
  * Refused above this rather than capped, which is the opposite of what {@link boundedLimit} does
  * with a listing, and the difference is what a partial answer would mean. A listing cut at fifty is
@@ -146,7 +148,22 @@ const MAX_UID = 4_294_967_295;
  * not, which the model would have to discover by listing again. The cap is well above what a Bot
  * handling a mailbox by hand ever names in one go, and the refusal says the number.
  */
-const MAX_MARKED = 100;
+const MAX_UIDS = 100;
+
+/**
+ * What one call of {@link uidsArg} is for, in the three shapes its sentences need it.
+ *
+ * The refusals say what will not happen, and "Nothing was marked" over a call that was archiving is
+ * a model told the wrong thing about the state of the mailbox. One word each, so the same parsing
+ * serves both without either borrowing the other's vocabulary.
+ */
+type UidAction = { verb: string; verbs: string; done: string };
+const MARKING: UidAction = { verb: "mark", verbs: "marks", done: "marked" };
+const ARCHIVING: UidAction = {
+  verb: "archive",
+  verbs: "archives",
+  done: "archived",
+};
 
 /**
  * What a call answers when this deployment has no mailbox configured.
@@ -177,7 +194,7 @@ function noPassword(account: string): string {
 }
 
 /**
- * The six tools, as the same shape a server would have answered `tools/list` with.
+ * The seven tools, as the same shape a server would have answered `tools/list` with.
  *
  * THE DESCRIPTIONS CARRY THE THINGS A MODEL CANNOT SEE. Two of them matter enough to be spelled out
  * rather than implied by a field name. The first is that a uid belongs to one mailbox: a uid read
@@ -234,7 +251,8 @@ const TOOLS: readonly McpTool[] = Object.freeze([
       "`search_messages`.",
       "",
       "A long message is cut off and says so. Nothing is marked read, moved or deleted by opening it:",
-      "to mark it read once it is handled, call `mark_read`.",
+      "to mark it read once it is handled, call `mark_read`, and to take it out of the inbox, call",
+      "`archive_messages`.",
       "",
       "Pass the same `folder` the uid came from. Uids are per folder, so a uid listed in one names a",
       "different message in another.",
@@ -297,7 +315,7 @@ const TOOLS: readonly McpTool[] = Object.freeze([
         uids: {
           type: "array",
           items: { type: "integer" },
-          description: `The uids to mark, from a listing or a search. One is fine. At most ${MAX_MARKED} in one call.`,
+          description: `The uids to mark, from a listing or a search. One is fine. At most ${MAX_UIDS} in one call.`,
         },
         folder: FOLDER_ARGUMENT,
       },
@@ -322,7 +340,38 @@ const TOOLS: readonly McpTool[] = Object.freeze([
         uids: {
           type: "array",
           items: { type: "integer" },
-          description: `The uids to mark, from a listing or a search. One is fine. At most ${MAX_MARKED} in one call.`,
+          description: `The uids to mark, from a listing or a search. One is fine. At most ${MAX_UIDS} in one call.`,
+        },
+        folder: FOLDER_ARGUMENT,
+      },
+      required: ["uids"],
+    },
+  },
+  {
+    name: "archive_messages",
+    description: [
+      "Move messages out of the folder they are in and into this account's archive folder, by uid. Use",
+      "it when a message has been dealt with and should leave the inbox. Nothing is deleted: the mail",
+      "is filed, and a person can move it back from any mail client.",
+      "",
+      "Archiving does not mark anything read. A message that was unread is unread in the archive, so",
+      "call `mark_read` as well if the mailbox should show it as handled; do that BEFORE archiving,",
+      "while the uids still name it here.",
+      "",
+      "The answer says which uids were archived, which are not in the folder at all, and which folder",
+      "they went to. A moved message gets a NEW uid there, so the numbers you passed no longer name it",
+      "anywhere: to see them again, list that folder.",
+      "",
+      "Pass the same `folder` the uids came from. Uids are per folder, so a uid listed in one names a",
+      "different message in another.",
+    ].join("\n"),
+    inputSchema: {
+      type: "object",
+      properties: {
+        uids: {
+          type: "array",
+          items: { type: "integer" },
+          description: `The uids to archive, from a listing or a search. One is fine. At most ${MAX_UIDS} in one call.`,
         },
         folder: FOLDER_ARGUMENT,
       },
@@ -524,7 +573,10 @@ function integerArg(
  * named is answered with what to name. Duplicates are one uid: naming a message twice is not two
  * messages.
  */
-export function uidsArg(args: Record<string, unknown>): {
+export function uidsArg(
+  args: Record<string, unknown>,
+  action: UidAction = MARKING,
+): {
   uids?: number[];
   error?: string;
 } {
@@ -548,7 +600,7 @@ export function uidsArg(args: Record<string, unknown>): {
           : Number.NaN;
     if (!Number.isInteger(value) || value < 1) {
       return {
-        error: `\`uids\` has to be a list of whole numbers, each at least 1; ${JSON.stringify(part)} is not one. Nothing was marked.`,
+        error: `\`uids\` has to be a list of whole numbers, each at least 1; ${JSON.stringify(part)} is not one. Nothing was ${action.done}.`,
       };
     }
     uids.push(value);
@@ -557,13 +609,12 @@ export function uidsArg(args: Record<string, unknown>): {
   const distinct = [...new Set(uids)];
   if (distinct.length === 0) {
     return {
-      error:
-        "Say which messages to mark, as `uids`, from list_messages or search_messages.",
+      error: `Say which messages to ${action.verb}, as \`uids\`, from list_messages or search_messages.`,
     };
   }
-  if (distinct.length > MAX_MARKED) {
+  if (distinct.length > MAX_UIDS) {
     return {
-      error: `${distinct.length} uids is more than the ${MAX_MARKED} one call marks. Nothing was marked; split them across calls.`,
+      error: `${distinct.length} uids is more than the ${MAX_UIDS} one call ${action.verbs}. Nothing was ${action.done}; split them across calls.`,
     };
   }
   return { uids: distinct };
@@ -694,6 +745,61 @@ export function markedInWords(
     );
   }
   return lines.join("\n");
+}
+
+/**
+ * What an archiving did, as sentences a model can check against the listing it worked from.
+ *
+ * EVERY UID IS NAMED, in one of two lists, for the reason {@link markedInWords} names them in
+ * three: a count would be a claim about messages the server never confirmed it touched.
+ *
+ * THE NEW UIDS ARE NOT IN IT, and saying so is the load-bearing sentence. Moving a message gives it
+ * a uid in the destination that has nothing to do with the one it had here, so the numbers the
+ * model just passed name nothing anywhere the moment this succeeds. A model that does not know
+ * that will archive five messages and then try to read one of them by the uid it archived, land on
+ * whatever message happens to hold that uid in the inbox, and summarize the wrong mail.
+ *
+ * A folder that had to be created is said first, because it is a change to the deployment's mailbox
+ * that nobody asked for by name and somebody will find later.
+ */
+export function archivedInWords(
+  receipt: MoveReceipt,
+  place: string,
+  archive: ArchiveFolder,
+): string {
+  const list = (uids: number[]) => uids.join(", ");
+  const count = (n: number) => (n === 1 ? "1 message" : `${n} messages`);
+  const lines: string[] = [];
+  if (archive.created) {
+    lines.push(
+      `This account had no archive folder, so folder ${archive.path} was created.`,
+    );
+  }
+  if (receipt.moved.length > 0) {
+    lines.push(
+      `Archived ${count(receipt.moved.length)} out of ${place} into folder ${archive.path}: uid ${list(receipt.moved)}.`,
+      `Each one has a new uid in ${archive.path}, so those numbers no longer name them; list that folder to see them again.`,
+    );
+  }
+  if (receipt.missing.length > 0) {
+    lines.push(
+      `There is no message with uid ${list(receipt.missing)} in ${place}. Uids are per folder, so check the listing ${receipt.missing.length === 1 ? "this one" : "these"} came from.`,
+    );
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Whether two folder names are the same folder, as far as this connector will claim.
+ *
+ * Case-insensitively, because `inbox` and `INBOX` are one folder on every server and a model writes
+ * either. Nothing cleverer: IMAP hierarchy delimiters and namespace prefixes vary per server, so a
+ * path this deployment did not get from the server itself is not one to reason about. It is only
+ * ever asked about a folder the caller named and a path the server just listed, which is the
+ * comparison it can actually answer.
+ */
+function sameFolder(one: string, other: string): boolean {
+  return one.trim().toLowerCase() === other.trim().toLowerCase();
 }
 
 /**
@@ -1139,6 +1245,51 @@ async function runTool(
       const nothingThere =
         receipt.changed.length === 0 && receipt.unchanged.length === 0;
       return nothingThere ? failure(text) : asResult(text);
+    }
+
+    if (toolName === "archive_messages") {
+      const asked = uidsArg(args, ARCHIVING);
+      if (asked.error || !asked.uids) {
+        return failure(asked.error ?? "Say which messages to archive.");
+      }
+      // Same split the markings do, and for the same reason: a number no mailbox could hold is a
+      // message that is not there, answered before dialling, without failing the rest of the list.
+      const impossible = asked.uids.filter((uid) => uid > MAX_UID);
+      const possible = asked.uids.filter((uid) => uid <= MAX_UID);
+      if (possible.length === 0) {
+        return failure(noSuchMessage(impossible[0] as number, place));
+      }
+
+      /*
+       * ONE SESSION FOR BOTH HALVES. Finding the archive folder is a LIST and moving the mail is a
+       * MOVE, and they belong to one another: a folder resolved on one connection and moved to on
+       * the next is a folder that could have been renamed in between, and it would be two logins
+       * for one operation.
+       */
+      return await clients.withSession(async (session) => {
+        const archive = await session.archive();
+        /*
+         * ARCHIVING THE ARCHIVE IS A NO-OP, and it is refused rather than issued. IMAP would
+         * accept a MOVE from a folder to itself, and what it does with it is server-specific:
+         * some copy and expunge, so the messages survive with new uids, and the answer would be a
+         * receipt full of uids that no longer name anything for no reason at all.
+         */
+        if (sameFolder(folder, archive.path)) {
+          return failure(
+            `${place} is this account's archive folder, so there is nothing to archive out of it. The messages are already filed.`,
+          );
+        }
+
+        const receipt = await session.move(folder, possible, archive.path);
+        const missing = [...receipt.missing, ...impossible];
+        const text = archivedInWords({ ...receipt, missing }, place, archive);
+        /*
+         * A failure only when nothing named was there to move, exactly as a marking decides it. One
+         * missing uid among several that moved is a note on a success: the mail was filed, and a
+         * model told the call failed would try to file it again by uids that no longer exist.
+         */
+        return receipt.moved.length === 0 ? failure(text) : asResult(text);
+      });
     }
 
     if (toolName === "send_message") {

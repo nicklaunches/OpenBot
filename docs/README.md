@@ -7,7 +7,7 @@ Start with the root [README](../README.md), then use these references:
 - [Development](development.md): local setup, migrations, ports, and quality checks.
 - [Coworkers](coworkers.md): durable Bot profiles, channels, visibility, deletion, and external AG-UI registration.
 - [Routines](routines.md): standing instructions a Bot runs on a schedule, the worker that fires them, and who they run as.
-- [Mailbox](mailbox.md): the deployment's own mailbox, the six tools a Bot reads, marks and answers it with, and where the password lives.
+- [Mailbox](mailbox.md): the deployment's own mailbox, the seven tools a Bot reads, marks, archives and answers it with, and where the password lives.
 - [Search Console](search-console.md): how the deployment's own sites are doing in Google Search, the four read tools, and which properties a Bot may ask about.
 - Plugins, one connector per page — what an administrator registers, what each person consents to, and what the failures mean:
   - [Google Drive](plugins/google-drive.md)

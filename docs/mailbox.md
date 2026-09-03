@@ -1,7 +1,7 @@
 # Mailbox
 
 The Mailbox connector gives a Bot the deployment's mail: it can list what has arrived, open a message, search
-for one, mark messages read or unread, and send mail, including a threaded reply. "Check the support mailbox and tell me what came
+for one, mark messages read or unread, archive them, and send mail, including a threaded reply. "Check the support mailbox and tell me what came
 in overnight" is a mailbox question, and so is "reply to Dana and say we will have it by Friday."
 
 The mailbox belongs to the deployment. It is not the mailbox of whoever is asking, and no person
@@ -25,17 +25,19 @@ Two things, and both are an administrator's:
 
 1. **Configuration**, which says where the mailbox is and which accounts are on it (below).
 2. **Grants**, which say which Bots may use it. Mailbox is a catalogue entry like any other, at
-   `/admin/plugins/mailbox`, and enabling the entry hands no Bot anything. Each of the six tools is
-   granted per Bot, so "may read the mail", "may mark it handled" and "may answer it" are three
-   separate decisions.
+   `/admin/plugins/mailbox`, and enabling the entry hands no Bot anything. Each of the seven tools is
+   granted per Bot, so "may read the mail", "may mark it handled", "may file it away" and "may
+   answer it" are four separate decisions.
 
 `send_message` is a write in the strongest sense this product has: it reaches people who never
 agreed to talk to a Bot, and there is nothing to recall once it has run. Grant it deliberately, and
 consider a policy rule that requires approval for it the same way one would for any other
-irreversible action. `mark_read` and `mark_unread` are the connector's other two writes, and of a
-different weight: each changes one flag on the deployment's own mail server and the other undoes it.
-They are classified as writes so a policy that gates writes can say so; a deployment that
-approval-gates sending has no reason to gate these the same way.
+irreversible action. `mark_read`, `mark_unread` and `archive_messages` are the connector's other
+three writes, and of a different weight: they change the deployment's own mailbox and a person
+undoes any of them by hand in any mail client. A marking sets or clears one flag; archiving moves a
+message into a folder of the same account, and deletes nothing. They are classified as writes so a
+policy that gates writes can say so; a deployment that approval-gates sending has no reason to gate
+these the same way.
 
 ## Configuration
 
@@ -91,7 +93,7 @@ base64 forms as well as the plaintext, because neither client sends the password
 authenticates with `AUTH=PLAIN` or `AUTH=LOGIN`, both base64 on the wire, so a quoted command
 carries an encoding of it rather than the password itself.
 
-## The six tools
+## The seven tools
 
 Every one of them takes two arguments about where to look, and they are different things:
 
@@ -148,6 +150,10 @@ newest first."
   names every uid in one of three lists: marked, already read and left alone, or not in the folder.
   Nothing else about a message changes.
 - **`mark_unread`**: the reverse, so a message shows as new again. Same arguments, same answer.
+- **`archive_messages`**: moves the messages named in `uids` out of the folder they are in and into
+  that account's archive folder. Same bound as a marking: at most 100 in one call. Nothing is
+  deleted, and archiving does not mark anything read, so a Bot that wants both calls `mark_read`
+  first, while the uids still name the messages. See [The archive folder](#the-archive-folder).
 - **`send_message`**: sends `to`, `subject` and `body` from the deployment's mailbox, and files a
   copy in the account's Sent folder. Give `in_reply_to` as the uid of a message and the reply
   threads: the original is fetched, its `Message-ID` becomes `In-Reply-To`, its own `References`
@@ -181,6 +187,40 @@ already gone. The confirmation then says the mail was sent, names the reason no 
 says not to send it again. A model told only that something failed would send the message a second
 time, and mail cannot be recalled.
 
+### The archive folder
+
+Archiving is a move, and the destination is never a caller's argument: it is the archive folder of
+the same account, resolved per call. That is the whole shape of the tool, and it is what keeps it
+from being a delete with extra steps. There is no tool that moves mail to Trash or Junk, because a
+message in Trash is one expunge from gone and one in Junk teaches the server that the sender is
+spam.
+
+The folder is resolved the way the Sent folder is: by its IMAP special-use flag first, so a
+localised server whose archive is `Archiv` or `Vieux courrier` is found anyway, and by the names
+`Archive` and `Archives` on a server that marks nothing. **An account with neither gets one
+created**, named `Archive` under whatever namespace prefix the server wants, and the answer says so:
+"This account had no archive folder, so folder INBOX.Archive was created." A mailbox that has never
+archived anything is the ordinary state of a fresh account rather than a misconfiguration, and
+refusing over a folder that takes one command to make would be refusing over nothing. A server that
+will not create one fails the call in its own words, since there is then nowhere to put the mail.
+
+**A moved message gets a new uid.** Uids belong to a folder, so archiving a message ends the meaning
+of the number that named it: it has another one in the archive and nothing left in the folder it
+came from. The answer says so in as many words, because a model that does not know it will archive
+five messages and then read one back by the uid it just archived, landing on whatever message now
+holds that number in the inbox. To see them again, list the archive folder.
+
+**Archiving out of the archive is refused**, before anything moves. IMAP would accept a move from a
+folder to itself and what it does with one is server-specific; on a server that copies and expunges,
+the answer would be a list of uids that stopped naming anything in exchange for no change at all.
+
+Like a marking, a move is reported uid by uid: the uids are read before the `MOVE`, so a message
+deleted since the listing is reported as not there rather than counted as filed. A call where none
+of the uids existed is a failure; one where some moved and one was missing is a success with a note,
+since the mail was filed and a model told otherwise would try to file it again by numbers that no
+longer name anything. A server that refuses the move (a read-only folder at either end) is reported
+as nothing archived.
+
 **Uids are per folder, and a folder belongs to one account.** A uid from a listing of `Archive`
 names a different message in `INBOX`, and a uid from `support@`'s INBOX names a different message in
 `sales@`'s, so every tool that takes one also takes the `folder` and the `account` it came from. A
@@ -200,9 +240,11 @@ thirty-second inactivity timeouts, and the socket is closed when it expires. The
 alone would let a server that drips one byte at a time hold a turn open forever.
 
 **Nothing is changed by reading.** Opening a message does not mark it read, move it or delete it.
-Marking is its own call, `mark_read`, granted on its own, and it is the only thing a Bot can change
-about a message: there is no tool that moves or deletes one. A connection is opened, used and closed
-per call; no session is kept.
+Changing a message is always its own call, granted on its own, and there are only two things a Bot
+can change: the read flag, through `mark_read` and `mark_unread`, and which folder a message is in,
+through `archive_messages`, whose one destination is that account's archive folder. **No tool
+deletes mail**, and none moves it anywhere else. A connection is opened, used and closed per call;
+no session is kept.
 
 **A marking is reported uid by uid, never as a count.** An IMAP `STORE` says nothing about which
 messages it touched: a uid that is not in the folder is skipped without a word, and one already in
@@ -241,8 +283,8 @@ switched to dry-run.
 
 Nothing about a Mailbox tool call is special. It goes through `plugins/store.ts` like every other
 connector: the Bot's grant is checked, the policy is evaluated with the tool's effect (`send_message`,
-`mark_read` and `mark_unread` as writes, the other three as reads), an audit row is written, and only
-then is any mail server dialled. There is no second path to the mailbox and no bypass.
+`mark_read`, `mark_unread` and `archive_messages` as writes, the other three as reads), an audit row
+is written, and only then is any mail server dialled. There is no second path to the mailbox and no bypass.
 
 The grant is per tool. It is not per account, and the policy engine cannot make it one, for the same
 reason it cannot bound recipients: a rule sees a tool call's name and effect, never its arguments.
